@@ -664,3 +664,17 @@ test('a pane the person closed by hand is not reopened by a prompt', async ($, o
   await new Promise(resolve => setTimeout(resolve, 5))
   expect(opened).toEqual([])
 })
+
+test('a resumed session shows the chat context at once, before its next reply', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  mock.store(on)
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  for (const name of ['agent.register', 'tool.register', 'command.register'] as const) on(name, () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('session.usage', () => ({ value: { rateLimits: [], context: { tokens: 300_000, window: 1_000_000 } } }) as never)
+  on('session.start', () => ({ cwd: '/p' }) as never)
+  await $.session.start({ source: 'resume', cwd: '/p' } as never)
+  const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'terminal', ...PANE } as never)
+  expect(await ui.find({ type: 'Text', text: /Chat .*300k\/1000k \(30%\)/ })).toBeDefined()
+  await ui.unmount()
+})

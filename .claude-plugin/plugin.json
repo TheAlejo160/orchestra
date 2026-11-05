@@ -1,6 +1,6 @@
 {
   "name": "orchestra",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Multi-agent orchestra for Claude Code: routes each part of a task to the best-fit, cheapest model among Claude subagents and external CLI agents (Codex, Antigravity/Gemini, OpenCode, Copilot, Kimi), guards shared files, lets agents talk on a shared board, relays long messages through Haiku, runs a lean efficiency mode, and shows plan usage, context, files and agent conversations in one pane",
   "author": { "name": "TheAlejo160", "url": "https://github.com/TheAlejo160" },
   "homepage": "https://github.com/TheAlejo160/orchestra",

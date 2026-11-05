@@ -1106,7 +1106,11 @@ export const register: Register = on => {
     })
     await $.command.register({ name: 'orchestra', description: 'Show the orchestra pane; "/orchestra lean on|off" toggles lean mode' })
     void $.ui.open({ id: PANE, title: 'Orchestra' })
-    const { rateLimits } = await $.session.usage()
+    const { rateLimits, context } = await $.session.usage()
+    // A resumed session already has a filled window: show it before the first new reply names the model.
+    if (context.tokens !== undefined && (await read($, main)) === null) {
+      await update($, main, () => ({ model: '', effort: '', tokens: context.tokens ?? 0, window: context.window }))
+    }
     await update($, limits, () => rateLimits)
     // The last session's model list answers at once; a fresh read replaces it in the background.
     const cached = (await $.store.get('catalog')) as OrchestraModel[] | undefined
@@ -1535,7 +1539,7 @@ export const register: Register = on => {
             <Text>
               Chat {'  '}
               <Text color={top.tokens / Math.max(1, top.window) >= 0.8 ? 'yellow' : 'cyan'}>{bar(top.tokens, top.window)}</Text> {kTokens(top.tokens)}/
-              {kTokens(top.window)} ({pct(top.tokens, top.window)})<Text dimColor> · {short(top.model)} · effort {top.effort}</Text>
+              {kTokens(top.window)} ({pct(top.tokens, top.window)}){top.model !== '' && <Text dimColor> · {short(top.model)} · effort {top.effort}</Text>}
             </Text>
           ),
           premium > 0 && (
