@@ -1,0 +1,6 @@
+{
+  "name": "orchestra",
+  "owner": { "name": "TheAlejo160", "url": "https://github.com/TheAlejo160" },
+  "description": "The orchestra mod for Claude Code and its lean multi-agent skill",
+  "plugins": [{ "name": "orchestra", "source": "./", "description": "Multi-agent orchestra with a live pane, file guard, shared board, Haiku relay and lean mode" }]
+}
