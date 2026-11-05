@@ -1,5 +1,5 @@
 ---
-name: orchestra
+name: skill
 description: Lean multi-agent mode for the orchestra mod. Splits work across Claude subagents and external CLI agents (Codex, Antigravity/Gemini, OpenCode, Copilot, Kimi, any other installed) so each part goes to the cheapest model that does it well. It keeps answers short, code minimal and complete, and agent briefs, notes and reports small, the way a lazy senior engineer works. Use it on any coding task with more than one part, when the person names agents or models ("usa codex", "con gemini", "que lo revise opus", "reparte", "orquesta"), when they ask what the agents are doing, or when work should spend fewer tokens and less of the 5-hour and weekly limits.
 ---
 

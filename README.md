@@ -20,7 +20,7 @@ The repository also contains:
 | File | What it is |
 |---|---|
 | `hooks/register.tsx` | The mod: routing, the `delegate` tool, the shared board, the file guard, the Haiku relay, lean mode and the pane. |
-| `skills/orchestra/SKILL.md` | The skill: efficiency and orchestration rules (short answers, minimal complete code, judging which model to use, lean briefs). |
+| `skills/skill/SKILL.md` | The skill: efficiency and orchestration rules (short answers, minimal complete code, judging which model to use, lean briefs). |
 | `MASTER-PROMPT.md` · `PROMPT-MAESTRO.md` | The master prompt, in English and in Spanish, to paste into Claude Code. It detects your agents, asks about your plans, and builds or upgrades the mod. |
 | `install-skill.sh` | Copies the skill into the skill folders of the agents installed on your machine. |
 | `hooks/register.test.ts` | The mod's tests, run with `claude plugin test`. |
@@ -74,11 +74,11 @@ Or at the Claude Code prompt:
 /plugin install orchestra --marketplace TheAlejo160/orchestra
 ```
 
-Restart Claude Code. The pane opens by itself. After that:
+Restart Claude Code. The pane opens by itself with each session. In a terminal narrower than 144 columns, Claude Code holds back panes that plugins open on their own, so the pane appears with your first message instead. If you close it by hand, it stays closed until `/orchestra`. After that:
 
 - `/orchestra` reopens the pane.
 - `/orchestra lean on|off` turns lean mode on or off.
-- The skill `orchestra:orchestra` ships inside the plugin, and Claude loads it when needed. You never have to invoke it.
+- The skill `orchestra:skill` ships inside the plugin, and Claude loads it when needed. You never have to invoke it.
 
 To update:
 
@@ -105,7 +105,7 @@ To install the skill into the agents you have:
 git clone https://github.com/TheAlejo160/orchestra && sh orchestra/install-skill.sh
 ```
 
-The script only copies `skills/orchestra/SKILL.md`, into these folders for the CLIs it finds:
+The script only copies `skills/skill/SKILL.md`, into these folders for the CLIs it finds:
 
 | Agent | Personal skills folder |
 |---|---|
@@ -181,7 +181,7 @@ Lo acompañan dos cosas:
 | Archivo | Qué es |
 |---|---|
 | `hooks/register.tsx` | El mod: reparto de trabajo, herramienta `delegate`, tablero, guard de archivos, relay con Haiku, modo lean y panel. |
-| `skills/orchestra/SKILL.md` | La skill: reglas de eficiencia y de orquestación (respuestas cortas, código mínimo y completo, criterio para elegir modelos, encargos cortos). |
+| `skills/skill/SKILL.md` | La skill: reglas de eficiencia y de orquestación (respuestas cortas, código mínimo y completo, criterio para elegir modelos, encargos cortos). |
 | `PROMPT-MAESTRO.md` · `MASTER-PROMPT.md` | El prompt maestro, en español y en inglés, para pegar en Claude Code. Detecta tus agentes, te pregunta por tus planes y construye o mejora el mod. |
 | `install-skill.sh` | Copia la skill en las carpetas de los agentes que tengas instalados. |
 | `hooks/register.test.ts` | Tests del mod (`claude plugin test`). |
@@ -241,11 +241,11 @@ O desde el prompt de Claude Code:
 /plugin install orchestra --marketplace TheAlejo160/orchestra
 ```
 
-Reinicia Claude Code. El panel se abre solo. Después:
+Reinicia Claude Code. El panel se abre solo en cada sesión. En una terminal de menos de 144 columnas, Claude Code retiene los paneles que un plugin abre por su cuenta, así que el panel aparece con tu primer mensaje. Si lo cierras a mano, no vuelve a abrirse hasta que escribas `/orchestra`. Después:
 
 - `/orchestra` vuelve a abrir el panel.
 - `/orchestra lean on|off` enciende o apaga el modo eficiencia.
-- La skill `orchestra:orchestra` viene dentro del plugin y Claude la carga cuando hace falta; no tienes que invocarla.
+- La skill `orchestra:skill` viene dentro del plugin y Claude la carga cuando hace falta; no tienes que invocarla.
 
 Para actualizar:
 
@@ -272,7 +272,7 @@ Para instalarla en los agentes que tengas:
 git clone https://github.com/TheAlejo160/orchestra && sh orchestra/install-skill.sh
 ```
 
-El script solo copia `skills/orchestra/SKILL.md` en estas carpetas, según qué CLIs encuentre:
+El script solo copia `skills/skill/SKILL.md` en estas carpetas, según qué CLIs encuentre:
 
 | Agente | Carpeta de skills personal |
 |---|---|

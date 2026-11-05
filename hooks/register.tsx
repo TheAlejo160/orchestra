@@ -80,7 +80,7 @@ Work like a lazy senior engineer and talk like one: every token is paid for, by 
 - Briefs to agents are lean: goal, owned files (absolute paths), constraints, done-check command; bullets, no prose, nothing the agent can read in the code itself.
 - Trust digests: open a full report only when the digest leaves a question. Never re-do an agent's work to check it; have a different model review it.
 - End a reply with one line: what was not verified, and any risk the person must know.
-Before splitting work across agents, load the orchestra:orchestra skill: it is the long form of these rules.
+Before splitting work across agents, load the orchestra:skill skill: it is the long form of these rules.
 The person turns this off with /orchestra lean off.`
 
 /** For every subagent, Claude or external. */
@@ -1122,6 +1122,21 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A pane opened at session.start waits undrawn on a terminal under 144 columns; one opened while the person
+  // submits a prompt counts as asked and is placed at any width. Closed by hand, it stays closed until /orchestra.
+  on('prompt.submit', async ($, e, next) => {
+    if ((await $.store.get('paneClosed').catch(() => undefined)) !== true) {
+      const pane = (await $.ui.panes().catch(() => [])).find(p => p.id === PANE)
+      if (pane === undefined || !pane.isPlaced) void $.ui.open({ id: PANE, title: 'Orchestra' }).catch(() => {})
+    }
+    return next(e)
+  })
+
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE && e.origin.kind === 'person') await $.store.set('paneClosed', true).catch(() => {})
+    return next(e)
+  })
+
   on('command.run', { command: 'orchestra' }, async ($, e) => {
     const [word, value] = e.args.trim().toLowerCase().split(/\s+/)
     if (word === 'lean') {
@@ -1130,6 +1145,7 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
       return { text: `Orchestra lean mode ${isOn ? 'on' : 'off'}: this chat and new external agents now; Claude subagent roles from the next session.` }
     }
+    await $.store.set('paneClosed', false).catch(() => {})
     await $.ui.open({ id: PANE, title: 'Orchestra' })
     return { text: 'Orchestra pane opened. /orchestra lean [on|off] toggles lean mode.' }
   })

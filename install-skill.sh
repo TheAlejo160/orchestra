@@ -3,11 +3,12 @@
 # It only copies one SKILL.md; it reads and changes nothing else.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
-src="$here/skills/orchestra/SKILL.md"
-[ -f "$src" ] || { echo "skills/orchestra/SKILL.md not found next to this script" >&2; exit 1; }
+src="$here/skills/skill/SKILL.md"
+[ -f "$src" ] || { echo "skills/skill/SKILL.md not found next to this script" >&2; exit 1; }
 
 install_to() { # $1 skills folder, $2 agent name
-  mkdir -p "$1/orchestra" && cp "$src" "$1/orchestra/SKILL.md" && echo "installed for $2: $1/orchestra/SKILL.md"
+  # Inside the Claude Code plugin the skill is orchestra:skill; on its own it is named orchestra.
+  mkdir -p "$1/orchestra" && sed 's/^name: skill$/name: orchestra/' "$src" > "$1/orchestra/SKILL.md" && echo "installed for $2: $1/orchestra/SKILL.md"
 }
 
 found=0

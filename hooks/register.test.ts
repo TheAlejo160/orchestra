@@ -630,3 +630,37 @@ test('lean mode is on by default for the chat and every agent, and /orchestra le
   expect(String((off as { text?: string }).text)).toContain('lean mode off')
   expect(await ids()).not.toContain('orchestra:lean')
 })
+
+test('the pane opens with the first prompt at any width, and stays shut once the person closes it', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  mock.store(on)
+  const opened: string[] = []
+  let placed = false
+  on('ui.panes', () => ({ value: placed ? [{ id: 'orchestra', title: 'Orchestra', isShown: true, isFocused: false, isPlaced: true }] : [] }) as never)
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    placed = true
+    return { value: { isPlaced: true } } as never
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  await $.prompt.submit({ text: 'hola' } as never)
+  await new Promise(resolve => setTimeout(resolve, 5))
+  expect(opened).toEqual(['orchestra'])
+  await $.prompt.submit({ text: 'otra' } as never)
+  expect(opened.length).toBe(1)
+})
+
+test('a pane the person closed by hand is not reopened by a prompt', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  mock.store(on, { paneClosed: true })
+  const opened: string[] = []
+  on('ui.panes', () => ({ value: [] }) as never)
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } } as never
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  await $.prompt.submit({ text: 'hola' } as never)
+  await new Promise(resolve => setTimeout(resolve, 5))
+  expect(opened).toEqual([])
+})
