@@ -1,5 +1,7 @@
 # Prompt maestro: «orchestra» para Claude Code
 
+[English](MASTER-PROMPT.md) · **Español**
+
 Sirve para dos cosas:
 
 - **Crear** el mod desde cero en un equipo que no lo tiene.
