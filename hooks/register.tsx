@@ -1797,10 +1797,12 @@ export const register: Register = on => {
     // A header that opens and shuts its section; in the terminal its digit does too while the pane has the focus.
     const fold = (section: string, hotkey: string | undefined, title: RenderChildren, summary: string) => (
       <Button key={`fold-${section}`} plain {...(hotkey ? { hotkey } : {})} onPress={() => toggle(section)}>
-        <Text bold>
-          {isOpen(section) ? '▾' : '▸'} {title}
+        <Text>
+          <Text bold>
+            {isOpen(section) ? '▾' : '▸'} {title}
+          </Text>
+          <Text dimColor> {summary}</Text>
         </Text>
-        <Text dimColor> {summary}</Text>
       </Button>
     )
 
@@ -2040,7 +2042,7 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {card(
           '◔ Usage',
-          'live · routing skips what is used up until it resets',
+          'live · a used-up model waits for its reset',
           <Text>
             <Text bold color={PROVIDER_COLOR.claude}>
               Claude
@@ -2069,13 +2071,18 @@ export const register: Register = on => {
           groupNames.map(name => {
             const members = everyone.filter(a => (a.group ?? GENERAL) === name)
             return (
-              <Text>
-                <Text color="cyan">▣ {name}</Text>
-                <Text dimColor>
-                  {' '}
-                  ({members.length} agent{members.length === 1 ? '' : 's'}, {members.filter(a => a.isRunning).length} running) {goalOf(name, goals, members) ?? ''}
+              <Box flexDirection="column">
+                <Text>
+                  <Text bold color="cyan">
+                    ▣ {name}
+                  </Text>
+                  <Text dimColor>
+                    {' '}
+                    · {members.filter(a => a.isRunning).length}/{members.length} running
+                  </Text>
                 </Text>
-              </Text>
+                {goalOf(name, goals, members) !== undefined && <Text dimColor>{'  '}{oneLine(goalOf(name, goals, members)!, 110)}</Text>}
+              </Box>
             )
           }),
           PROVIDER_ORDER.map(providerBlock),
@@ -2164,7 +2171,7 @@ export const register: Register = on => {
         )}
         {card(
           '✉ Message the team',
-          'running Claude agents get it now · the rest read the board',
+          '✓ delivered now · ◌ waits on the board',
           Select !== undefined && (
             <Select
               key="team-to"
