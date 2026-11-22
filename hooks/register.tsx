@@ -372,24 +372,28 @@ const resolveRecipient = async ($: EngineInterface, to: string) => {
 
 /** Hands a note to the running Claude subagents it names (one agent, or a group's members): the board alone reaches only those who read it. */
 const deliver = async ($: EngineInterface, note: OrchestraNote) => {
-  if (note.to === undefined) return
+  if (note.to === undefined) return 0
   const targets = Object.values(await read($, agents)).filter(
     a => a.provider === 'claude' && a.isRunning && a.label !== note.from && (a.label === note.to || a.group === note.to),
   )
+  let delivered = 0
   // A finished subagent would be resumed (and paid for) by a send, so only running ones get it.
   for (const a of targets) {
     // An earlier send can take long enough for this one to finish meanwhile.
     if (!(await read($, agents))[a.id]?.isRunning) continue
-    await $.session.send({ to: { agentId: a.id }, text: `[orchestra board] ${note.from} → ${note.to}: ${note.text}` }).catch(() => undefined)
+    const sent = await $.session.send({ to: { agentId: a.id }, text: `[orchestra board] ${note.from} → ${note.to}: ${note.text}` }).catch(() => undefined)
+    if (sent?.isDelivered) delivered++
   }
+  return delivered
 }
 
 const postNote = async ($: EngineInterface, note: OrchestraNote) => {
   const relayed = note.relayed ? { text: note.text, relayed: true } : await relay($, note.text, 'note')
   const clean = { ...note, text: relayed.text.slice(0, 500), ...(relayed.relayed ? { relayed: true } : {}) }
-  await update($, notes, list => [...list, clean].slice(-50))
+  const delivered = await deliver($, clean)
+  const kept = delivered > 0 ? { ...clean, delivered } : clean
+  await update($, notes, list => [...list, kept].slice(-50))
   await logEvent($, { kind: 'note', ...clean })
-  await deliver($, clean)
   await writeBoardFile($).catch(() => {})
 }
 
@@ -2023,6 +2027,14 @@ export const register: Register = on => {
     const thread = picked === undefined ? [] : allNotes.filter(n => n.from === picked.label || n.to === picked.label || n.to === picked.group).slice(-8)
     const recipients = [...new Set([...running.map(a => a.label), ...everyone.map(a => a.group), 'orchestrator'])]
     const to = recipients.includes(view.to) ? view.to : (picked?.label ?? 'orchestrator')
+    const recipientLabel = (r: string) => {
+      if (r === 'orchestrator') return 'orchestrator · this chat'
+      const a = running.find(x => x.label === r)
+      if (a) return `${r} · ${PROVIDER_NAMES[a.provider]} · running`
+      const members = everyone.filter(x => x.group === r)
+      return `▣ ${r} · group of ${members.length} (${members.filter(x => x.isRunning).length} running)`
+    }
+    const sentByYou = allNotes.filter(n => n.from === 'you').slice(-3)
 
     return (
       <Box flexDirection="column">
@@ -2152,21 +2164,45 @@ export const register: Register = on => {
         )}
         {card(
           '✉ Message the team',
-          'read on the board',
+          'running Claude agents get it now · the rest read the board',
           Select !== undefined && (
-            <Select key="team-to" label="To" value={to} options={recipients.map(r => ({ value: r, label: r }))} onSelect={value => void setView({ to: value })} />
-          ),
-          Input !== undefined && (
-            <Input
-              key="team-message"
-              placeholder="Write a message…"
-              submitLabel="Send"
-              onSubmit={text => {
-                if (text.trim()) void postNote($, { from: 'you', to, text: text.trim() })
-              }}
+            <Select
+              key="team-to"
+              label="To"
+              value={to}
+              options={recipients.map(r => ({ value: r, label: recipientLabel(r) }))}
+              onSelect={value => void setView({ to: value })}
             />
           ),
+          Input !== undefined && (
+            <Box marginTop={1} flexDirection="column">
+              <Input
+                key="team-message"
+                rows={2}
+                placeholder={`Message for ${to}…`}
+                submitLabel="Send"
+                onSubmit={text => {
+                  if (text.trim()) void postNote($, { from: 'you', to, text: text.trim() })
+                }}
+              />
+            </Box>
+          ),
           Input === undefined && <Text dimColor>Open this pane on the computer to send messages.</Text>,
+          sentByYou.length > 0 && (
+            <Box marginTop={1} flexDirection="column">
+              {sentByYou.map(n => (
+                <Text>
+                  <Text color={n.delivered ? 'green' : undefined} dimColor={!n.delivered}>
+                    {n.delivered ? '✓' : '◌'}
+                  </Text>{' '}
+                  <Text bold>{n.to}</Text>
+                  <Text dimColor>
+                    : {oneLine(n.text, 70)} · {n.delivered ? `delivered to ${n.delivered}` : 'on the board'}
+                  </Text>
+                </Text>
+              ))}
+            </Box>
+          ),
         )}
         {card(
           '⚡ Haiku relay',

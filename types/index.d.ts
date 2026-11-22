@@ -36,7 +36,8 @@ export type OrchestraAgent = {
 export type OrchestraClaim = { agentId: string; label: string }
 
 /** relayed: Haiku condensed it before it reached the board. */
-export type OrchestraNote = { from: string; to?: string; text: string; relayed?: boolean }
+/** delivered: how many running Claude agents got it straight away (the rest read the board). */
+export type OrchestraNote = { from: string; to?: string; text: string; relayed?: boolean; delivered?: number }
 
 /** How an agent touches a file: edits it, audits (reviews) it, reads it, or reads it to plan; symbols are the functions or classes its edits hit. */
 export type OrchestraTouch = { role: 'edits' | 'audits' | 'reads' | 'plans'; symbols: string[] }
