@@ -26,6 +26,8 @@ export type OrchestraAgent = {
   /** Who handed it the task. */
   from: string
   doing: string
+  /** Its last few steps, oldest first: what a Haiku status reads. */
+  recent?: string[]
   isRunning: boolean
   /** The Markdown report an external agent left, relative to the project. */
   report?: string
@@ -34,7 +36,8 @@ export type OrchestraAgent = {
 export type OrchestraClaim = { agentId: string; label: string }
 
 /** relayed: Haiku condensed it before it reached the board. */
-export type OrchestraNote = { from: string; to?: string; text: string; relayed?: boolean }
+/** delivered: how many running Claude agents got it straight away (the rest read the board). */
+export type OrchestraNote = { from: string; to?: string; text: string; relayed?: boolean; delivered?: number }
 
 /** How an agent touches a file: edits it, audits (reviews) it, reads it, or reads it to plan; symbols are the functions or classes its edits hit. */
 export type OrchestraTouch = { role: 'edits' | 'audits' | 'reads' | 'plans'; symbols: string[] }
@@ -65,6 +68,26 @@ export type OrchestraModel = {
   efforts: string[]
   /** Why the account refused it on a recent run (plan, quota, sign-in); routing skips it until the block expires. */
   blocked?: string
+  /** When that block lapses (ms): the reset time the refusal named, or a default. */
+  blockedUntil?: number
+}
+
+export type OrchestraQuotaGroup = { name: string; models: string[]; windows: OrchestraLimit[] }
+
+/** A CLI's usage as its own source last reported it: Codex's session log, GitHub's Copilot quota. */
+export type OrchestraQuota = {
+  windows: OrchestraLimit[]
+  /** Credits or premium requests left, in the source's terms. */
+  credits?: string
+  plan?: string
+  /** Models that share their own windows (Antigravity: Gemini, Claude and GPT, Argon). */
+  groups?: OrchestraQuotaGroup[]
+  /** What the CLI says beside the numbers, e.g. "AI credits: Out of credits" or "No usage data available". */
+  note?: string
+  /** Where the numbers come from. */
+  source: string
+  /** When the source measured them (ms). */
+  at: number
 }
 
 declare module 'claude-code' {
@@ -83,6 +106,8 @@ declare module 'claude-code' {
       /** By file path, then agent id. */
       touches: Record<string, Record<string, OrchestraTouch>>
       relay: OrchestraRelay
+      /** Usage read from each CLI that exposes it; the others show only their last refusal. */
+      quotas: Partial<Record<OrchestraExternal, OrchestraQuota>>
     }
   }
 }

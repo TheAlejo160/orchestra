@@ -248,7 +248,7 @@ test('agents sit in groups with their goal, split by Claude, Codex and Gemini, o
     const ui = await $.ui.mount({ plugin: 'orchestra', surface, ...PANE } as never)
     await expandAll(ui)
     expect(await ui.find({ type: 'Text', text: /▣ UI/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /\(2 agents, 2 running\)/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▣ UI · 2\/2 running/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Builds the nav bar and footer/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /▣ QA/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^ · 2 running · 0 done · nav bar, review$/ })).toBeDefined()
@@ -270,7 +270,7 @@ test('agents nobody grouped get a group and a goal by themselves', async ($, on)
     await expandAll(ui)
     expect(await ui.find({ type: 'Text', text: /▣ Polish/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Fixes wording, typos and formatting/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /▣ Shop.*2 agents/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▣ Shop · \d\/2 running/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Working on: Build the checkout form/ })).toBeDefined()
     await ui.unmount()
   }
@@ -451,19 +451,23 @@ test('OpenCode, Copilot and Kimi models are read from their CLIs, and a model th
   // Two Copilot tasks ran (cp and cp2): each spent a premium request.
   const pane = await $.ui.mount({ plugin: 'orchestra', surface: 'terminal', ...PANE } as never)
   await expandAll(pane)
-  expect(await pane.find({ type: 'Text', text: /Copilot 2 premium requests this month/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /2 premium requests this month · counted by the mod/ })).toBeDefined()
   await pane.unmount()
 })
 
 test('a model out of credits is left out alone, not its whole CLI, and a sign-in refusal shuts the CLI', async ($, on) => {
   memoryFs(on)
   await bootWith($, on, [
-    { provider: 'agy', id: 'gemini-3.8-flash-high', name: 'Gemini', window: 1_000_000, efforts: [] },
+    // Flash is listed first and fits Sonnet's tier, yet the retry must go to Gemini 4 Hydrogen high.
+    { provider: 'agy', id: 'gemini-3.8-flash-high', name: 'Gemini Flash', window: 1_000_000, efforts: [] },
+    { provider: 'agy', id: 'gemini-4-hydrogen-medium', name: 'Hydrogen M', window: 1_000_000, efforts: [] },
+    { provider: 'agy', id: 'gemini-4-hydrogen-high', name: 'Hydrogen H', window: 1_000_000, efforts: [] },
     { provider: 'agy', id: 'claude-sonnet-4-6', name: 'Sonnet', window: 200_000, efforts: ['low'] },
     { provider: 'kimi', id: 'kimi-code/k3', name: 'K3', window: 1_000_000, efforts: [] },
   ])
   on('session.cwd', () => ({ value: '/p' }) as never)
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('prompt.compose', () => ({ sections: [] }) as never)
   on('process.spawn', async function* (_$, e) {
     const cmd = e.argv.join(' ')
     if (cmd.includes('kimi')) {
@@ -483,7 +487,7 @@ test('a model out of credits is left out alone, not its whole CLI, and a sign-in
   const board = String((await $.tool.call({ tool: 'mcp__orchestra__board', action: 'read' } as never)).result)
   const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', ...PANE } as never)
   await expandAll(ui)
-  expect(await ui.find({ type: 'Text', text: /claude-sonnet-4-6 refused by the account, retrying on gemini-3\.8-flash-high/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /claude-sonnet-4-6 refused by the account, retrying on gemini-4-hydrogen-high/ })).toBeDefined()
   await ui.unmount()
   expect(board).toContain('agy-sonnet → orchestrator: Report:')
   expect(board).toContain('Read it.')
@@ -491,6 +495,12 @@ test('a model out of credits is left out alone, not its whole CLI, and a sign-in
   expect(String(sonnet.result)).toContain('credits balance is too low')
   const kimi = await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'kimi', task: 'x' } as never)
   expect(String(kimi.result)).toContain('kimi is refusing this account right now')
+  // Routing never recommends Flash: out of every tier, and named as ruled out.
+  const routing = ((await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }).sections.find(x => x.id === 'orchestra:routing')?.text ?? ''
+  const tiers = routing.slice(routing.indexOf('Tiers (provider:model):'), routing.indexOf('Cost:'))
+  expect(tiers).not.toContain('flash')
+  expect(tiers).toContain('agy:gemini-4-hydrogen-high')
+  expect(routing).toContain('The person ruled out, never pick: gemini-3.8-flash-high')
 })
 
 test('Codex offers only the newest model of each line, read live from the CLI', async ($, on) => {
@@ -570,6 +580,57 @@ test('the team pane shows who works with whom and sends the person\'s message to
   await ui.unmount()
   const board = String((await $.tool.call({ tool: 'mcp__orchestra__board', action: 'read', agentId: 't2' } as never)).result)
   expect(board).toContain('you → UI: ship it by noon')
+})
+
+test('a note reaches the running Claude agents it names, and Haiku writes an agent status without asking it', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  let n = 0
+  const sent: { to: unknown; text: string }[] = []
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `d${++n}` }))
+  on('tool.call', () => ({ result: 'ok' }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('session.send', (_$, e) => {
+    sent.push({ to: e.to, text: e.text })
+    return { isDelivered: true }
+  })
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'nav editing src/nav.tsx, not blocked', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }) as never)
+  await $.agent.spawn({ prompt: 'Build the nav', description: 'UI: nav', subagentType: 'orchestra:builder' } as never)
+  await $.agent.spawn({ prompt: 'Build the footer', description: 'UI: footer', subagentType: 'orchestra:builder' } as never)
+  await $.agent.spawn({ prompt: 'Write docs', description: 'Docs: readme', subagentType: 'orchestra:builder' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/p/src/nav.tsx', agentId: 'd1' } as never)
+
+  // To one agent, and to a group: every running member but the sender, nobody outside it.
+  await $.tool.call({ tool: 'mcp__orchestra__board', action: 'post', to: 'footer', text: 'link ready', agentId: 'd1' } as never)
+  await $.tool.call({ tool: 'mcp__orchestra__board', action: 'post', to: 'UI', text: 'tests pass', agentId: 'd1' } as never)
+  expect(sent.map(m => m.text)).toEqual(['[orchestra board] nav → footer: link ready', '[orchestra board] nav → UI: tests pass'])
+
+  // "ui" alone does not slip to another name that merely contains it.
+  await $.tool.call({ tool: 'mcp__orchestra__board', action: 'post', to: 'oot', text: 'x', agentId: 'd1' } as never)
+  expect(sent.at(-1)?.text).toContain('nav → footer: x')
+
+  const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', ...PANE } as never)
+  await ui.select({ key: 'team-agent', value: 'd1' } as never)
+  await ui.press({ key: 'team-status' } as never)
+  await ui.select({ key: 'team-to', value: 'footer' } as never)
+  await ui.input({ key: 'team-message', text: 'hi' } as never)
+  expect(await ui.find({ type: 'Text', text: /footer: hi · delivered to 1/ })).toBeDefined()
+  await ui.unmount()
+  const board = String((await $.tool.call({ tool: 'mcp__orchestra__board', action: 'read' } as never)).result)
+  expect(board).toContain('nav → you: status: nav editing src/nav.tsx, not blocked')
+})
+
+test('the routing prompt keeps its text while usage moves inside a step of 10', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  mock.store(on)
+  const compose = async () =>
+    ((await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }).sections.find(s => s.id === 'orchestra:routing')?.text ?? ''
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.measure({ changed: ['rateLimits'], rateLimits: [{ kind: 'five_hour', percentUsed: 41 }] } as never)
+  const first = await compose()
+  await $.session.measure({ changed: ['rateLimits'], rateLimits: [{ kind: 'five_hour', percentUsed: 48 }] } as never)
+  expect(await compose()).toBe(first)
+  expect(first).toContain('- claude: 5h 40%+ used')
 })
 
 test('a file two agents work on shows who edits which function and who audits it', async ($, on) => {
@@ -677,4 +738,133 @@ test('a resumed session shows the chat context at once, before its next reply', 
   const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'terminal', ...PANE } as never)
   expect(await ui.find({ type: 'Text', text: /Chat .*300k\/1000k \(30%\)/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('the Quotas card shows each CLI\'s usage or last refusal, and a used-up model is skipped until the reset it named', async ($, on) => {
+  memoryFs(on)
+  // 02:00 local time, so "try again at 4:06 AM" is today.
+  const start = new Date(2099, 2, 4, 2, 0).getTime()
+  const clock = mock.clock(on, { now: start })
+  mock.store(on, {
+    catalog: [
+      { provider: 'codex', id: 'gpt-6.2-sol', name: 'Sol', window: 272_000, efforts: ['high'] },
+      { provider: 'agy', id: 'gemini-4-argon-low', name: 'Argon', window: 1_000_000, efforts: [] },
+    ],
+  })
+  const resets = Math.round((start + 2 * 3_600_000) / 1000)
+  const rollout = JSON.stringify({
+    timestamp: new Date(start - 60_000).toISOString(),
+    type: 'event_msg',
+    payload: { type: 'token_count', rate_limits: { limit_id: 'codex', primary: { used_percent: 86, window_minutes: 300, resets_at: resets }, secondary: { used_percent: 72, window_minutes: 10080, resets_at: resets + 86_400 }, credits: { has_credits: false, unlimited: false, balance: '0' }, plan_type: 'plus' } },
+  })
+  const copilot = JSON.stringify({ copilot_plan: 'individual', quota_reset_date_utc: '2099-04-01T00:00:00.000Z', quota_snapshots: { premium_interactions: { percent_remaining: 55.4, remaining: 110, entitlement: 200, unlimited: false } } })
+  on('process.run', (_$, e) => {
+    const cmd = e.argv.join(' ')
+    const stdout = cmd.includes('rollout-') ? rollout : cmd.includes('copilot_internal') ? copilot : ''
+    return { value: { exitCode: stdout ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  for (const name of ['agent.register', 'tool.register', 'command.register'] as const) on(name, () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('session.usage', () => ({ value: { rateLimits: [], context: { window: 200_000 } } }) as never)
+  on('session.start', () => ({ cwd: '/p' }) as never)
+  on('session.cwd', () => ({ value: '/p' }) as never)
+  on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('process.spawn', async function* (_$, e) {
+    const cmd = e.argv.join(' ')
+    const line = cmd.includes('codex')
+      ? { type: 'turn.failed', error: { message: 'You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again at 4:06 AM.' } }
+      : { event: 'error', error: { message: 'Your AI credits balance is too low to continue.' } }
+    yield { stream: 'stdout' as const, text: `${JSON.stringify(line)}\n` }
+    return { value: { code: 1, signal: null } } as never
+  })
+  await $.session.start({ source: 'startup', cwd: '/p' } as never)
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'codex', model: 'gpt-6.2-sol', label: 'sol', task: 'Fix' } as never)
+  await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'agy', model: 'gemini-4-argon-low', label: 'argon', task: 'Read' } as never)
+  await new Promise(resolve => setTimeout(resolve, 80))
+
+  const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', ...PANE } as never)
+  expect(await ui.find({ type: 'Text', text: /5h .*86% used/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Week .*72% used/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /from ~\/\.codex\/sessions/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /110\/200 premium requests left/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /whole CLI: limited · until 04:06 \(in 2h 6m\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gemini-4-argon-low: out of credits/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /no reading yet: agy \/usage runs in a hidden terminal/ })).toBeDefined()
+  await ui.unmount()
+
+  const prompt = ((await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }).sections.find(s => s.id === 'orchestra:routing')?.text ?? ''
+  expect(prompt).toContain('- codex: 5h 80%+ used (resets 04:00)')
+  expect(prompt).toContain('- copilot: about 50% of 200 premium requests left')
+  expect(prompt).toContain('until 04:06')
+
+  const blocked = await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'codex', model: 'gpt-6.2-sol', task: 'x' } as never)
+  expect(String(blocked.result)).toContain('codex is refusing this account right now')
+  // Past the reset, the model is offered again.
+  await clock.advance(2 * 3_600_000 + 7 * 60_000)
+  const again = await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'codex', model: 'gpt-6.2-sol', label: 'sol2', task: 'x' } as never)
+  expect(String(again.result)).toContain('Started Codex agent "sol2"')
+  await new Promise(resolve => setTimeout(resolve, 80))
+})
+
+// Screens captured from the real CLIs (python pty, ANSI stripped), shortened.
+const CODEX_STATUS = 'Model provider: openai Account: someone@example.com (Plus) Session: 01a1 5h limit: [░░░░░░░░░░░░░░░░░░░░] 0% left (resets 4:06 AM) Weekly limit: [███████████░░░░] 26% left (resets 2:53 AM on 25 Nov) Ask Codex to do anything'
+const AGY_USAGE = '└ Models & Quota Account: someone@example.com GEMINI MODELS Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash Weekly Limit Remaining [ ████████░░ ] 82.81% Refreshes in 163h 8m Five Hour Limit Remaining [ ████░░░░ ] 39.85% Refreshes in 8m CLAUDE AND GPT MODELS Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B Weekly Limit Remaining [ █████░░░░ ] 49.64% Refreshes in 162h 55m Five Hour Limit Remaining [ ██████████ ] 100.00% Quota available GEMINI 4 ARGON For paid Pro plans, Argon quota is separate. Gemini 4 Argon Weekly Limit [ ░░░░░░░░░░ ] 0.00% Refreshes in 163h 37m │ Within each group, models share a weekly limit (1–37 of 38 lines) esc Close auto · Gemini 4 Hydrogen · xhigh · AI: Out of credits 0% 79%'
+const KIMI_USAGE = '╭ Usage ──╮ │ Session usage │ │ No token usage recorded yet. │ │ Plan usage │ │ No usage data available. │ ╰──────╯'
+
+test('codex /status, agy /usage and kimi /usage are read in a hidden terminal and fill the Quotas card', async ($, on) => {
+  memoryFs(on)
+  const start = new Date(2099, 10, 18, 2, 0).getTime()
+  mock.clock(on, { now: start })
+  mock.store(on, {
+    catalog: [
+      { provider: 'codex', id: 'gpt-6.2-sol', name: 'Sol', window: 272_000, efforts: ['high'] },
+      { provider: 'agy', id: 'gemini-4-argon-low', name: 'Argon', window: 1_000_000, efforts: [] },
+      { provider: 'agy', id: 'gemini-4-hydrogen-high', name: 'Hydrogen', window: 1_000_000, efforts: [] },
+      { provider: 'agy', id: 'claude-opus-5-5-high', name: 'Opus', window: 200_000, efforts: [] },
+      { provider: 'kimi', id: 'kimi-code/k3', name: 'K3', window: 1_000_000, efforts: [] },
+    ],
+    // An earlier failed run left Hydrogen marked out of credits; its group has room now, so the reading lifts it.
+    blocked: { 'agy:gemini-4-hydrogen-high': { reason: 'Your AI credits balance is too low to continue.', until: start + 72 * 3_600_000, kind: 'credits', at: start - 3_600_000 } },
+  })
+  const runs: { argv: string; stdin?: string }[] = []
+  on('process.run', (_$, e) => {
+    const argv = e.argv.join(' ')
+    runs.push({ argv, stdin: e.init?.stdin })
+    const pty = argv.includes('python3 -I -')
+    const stdout = pty && argv.includes('/status') ? CODEX_STATUS : pty && argv.includes(' agy /usage') || (pty && argv.endsWith('agy')) ? AGY_USAGE : pty && argv.endsWith('kimi') ? KIMI_USAGE : ''
+    return { value: { exitCode: stdout ? 0 : 1, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  for (const name of ['agent.register', 'tool.register', 'command.register'] as const) on(name, () => ({ value: undefined }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('session.usage', () => ({ value: { rateLimits: [], context: { window: 200_000 } } }) as never)
+  on('session.start', () => ({ cwd: '/p' }) as never)
+  await $.session.start({ source: 'startup', cwd: '/p' } as never)
+  await new Promise(resolve => setTimeout(resolve, 30))
+
+  // The usage commands run in a pseudo-terminal from the home folder, Codex without its update check.
+  const codexRun = runs.find(r => r.argv.includes('/status'))
+  expect(codexRun?.argv).toContain('cd ~')
+  expect(codexRun?.argv).toContain('codex -c check_for_update_on_startup=false')
+  expect(codexRun?.stdin).toContain('pty.fork()')
+
+  const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', ...PANE } as never)
+  expect(await ui.find({ type: 'Text', text: /5h .*100% used/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Week .*74% used.*resets Wed 02:53/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /from codex \/status$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Gemini 4 Argon$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Claude and GPT models · Claude Opus 5\.5, Claude Sonnet 5\.5, GPT-OSS 120B/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /AI credits: out of credits/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gemini-4-argon-low: limited · until Tue 21:37/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No usage data available/ })).toBeDefined()
+  await ui.unmount()
+
+  // Codex at 100% of its 5-hour window: the whole CLI waits for 04:06. Argon waits for its weekly refresh; Hydrogen is free again.
+  const codex = await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'codex', task: 'x' } as never)
+  expect(String(codex.result)).toContain('5h limit used up')
+  const argon = await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'agy', model: 'gemini-4-argon-low', task: 'x' } as never)
+  expect(String(argon.result)).toContain('Gemini 4 Argon: Week limit used up')
+  expect(String(argon.result)).toContain('Available: gemini-4-hydrogen-high, claude-opus-5-5-high')
 })
