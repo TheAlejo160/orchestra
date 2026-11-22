@@ -26,6 +26,8 @@ export type OrchestraAgent = {
   /** Who handed it the task. */
   from: string
   doing: string
+  /** Its last few steps, oldest first: what a Haiku status reads. */
+  recent?: string[]
   isRunning: boolean
   /** The Markdown report an external agent left, relative to the project. */
   report?: string

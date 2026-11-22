@@ -451,7 +451,7 @@ test('OpenCode, Copilot and Kimi models are read from their CLIs, and a model th
   // Two Copilot tasks ran (cp and cp2): each spent a premium request.
   const pane = await $.ui.mount({ plugin: 'orchestra', surface: 'terminal', ...PANE } as never)
   await expandAll(pane)
-  expect(await pane.find({ type: 'Text', text: /Copilot 2 premium requests this month/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /2 premium requests this month · counted by the mod/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -580,6 +580,54 @@ test('the team pane shows who works with whom and sends the person\'s message to
   await ui.unmount()
   const board = String((await $.tool.call({ tool: 'mcp__orchestra__board', action: 'read', agentId: 't2' } as never)).result)
   expect(board).toContain('you → UI: ship it by noon')
+})
+
+test('a note reaches the running Claude agents it names, and Haiku writes an agent status without asking it', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  let n = 0
+  const sent: { to: unknown; text: string }[] = []
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `d${++n}` }))
+  on('tool.call', () => ({ result: 'ok' }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('session.send', (_$, e) => {
+    sent.push({ to: e.to, text: e.text })
+    return { isDelivered: true }
+  })
+  on('model.complete', () => ({ value: { isAnswered: true, text: 'nav editing src/nav.tsx, not blocked', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }) as never)
+  await $.agent.spawn({ prompt: 'Build the nav', description: 'UI: nav', subagentType: 'orchestra:builder' } as never)
+  await $.agent.spawn({ prompt: 'Build the footer', description: 'UI: footer', subagentType: 'orchestra:builder' } as never)
+  await $.agent.spawn({ prompt: 'Write docs', description: 'Docs: readme', subagentType: 'orchestra:builder' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: '/p/src/nav.tsx', agentId: 'd1' } as never)
+
+  // To one agent, and to a group: every running member but the sender, nobody outside it.
+  await $.tool.call({ tool: 'mcp__orchestra__board', action: 'post', to: 'footer', text: 'link ready', agentId: 'd1' } as never)
+  await $.tool.call({ tool: 'mcp__orchestra__board', action: 'post', to: 'UI', text: 'tests pass', agentId: 'd1' } as never)
+  expect(sent.map(m => m.text)).toEqual(['[orchestra board] nav → footer: link ready', '[orchestra board] nav → UI: tests pass'])
+
+  // "ui" alone does not slip to another name that merely contains it.
+  await $.tool.call({ tool: 'mcp__orchestra__board', action: 'post', to: 'oot', text: 'x', agentId: 'd1' } as never)
+  expect(sent.at(-1)?.text).toContain('nav → footer: x')
+
+  const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', ...PANE } as never)
+  await ui.select({ key: 'team-agent', value: 'd1' } as never)
+  await ui.press({ key: 'team-status' } as never)
+  await ui.unmount()
+  const board = String((await $.tool.call({ tool: 'mcp__orchestra__board', action: 'read' } as never)).result)
+  expect(board).toContain('nav → you: status: nav editing src/nav.tsx, not blocked')
+})
+
+test('the routing prompt keeps its text while usage moves inside a step of 10', async ($, on) => {
+  mock.clock(on, { now: 0 })
+  mock.store(on)
+  const compose = async () =>
+    ((await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }).sections.find(s => s.id === 'orchestra:routing')?.text ?? ''
+  on('prompt.compose', () => ({ sections: [] }) as never)
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.measure({ changed: ['rateLimits'], rateLimits: [{ kind: 'five_hour', percentUsed: 41 }] } as never)
+  const first = await compose()
+  await $.session.measure({ changed: ['rateLimits'], rateLimits: [{ kind: 'five_hour', percentUsed: 48 }] } as never)
+  expect(await compose()).toBe(first)
+  expect(first).toContain('- claude: 5h 40%+ used')
 })
 
 test('a file two agents work on shows who edits which function and who audits it', async ($, on) => {
@@ -745,8 +793,8 @@ test('the Quotas card shows each CLI\'s usage or last refusal, and a used-up mod
   await ui.unmount()
 
   const prompt = ((await $.prompt.compose({ model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [], sections: [] } as never)) as { sections: { id: string; text: string }[] }).sections.find(s => s.id === 'orchestra:routing')?.text ?? ''
-  expect(prompt).toContain('- codex: 5h 86% used (resets 04:00)')
-  expect(prompt).toContain('- copilot: 110/200 premium requests left')
+  expect(prompt).toContain('- codex: 5h 80%+ used (resets 04:00)')
+  expect(prompt).toContain('- copilot: about 50% of 200 premium requests left')
   expect(prompt).toContain('until 04:06')
 
   const blocked = await $.tool.call({ tool: 'mcp__orchestra__delegate', provider: 'codex', model: 'gpt-6.2-sol', task: 'x' } as never)
@@ -802,7 +850,7 @@ test('codex /status, agy /usage and kimi /usage are read in a hidden terminal an
   const ui = await $.ui.mount({ plugin: 'orchestra', surface: 'desktop', ...PANE } as never)
   expect(await ui.find({ type: 'Text', text: /5h .*100% used/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Week .*74% used.*resets Wed 02:53/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /from codex \/status \(hidden terminal\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /from codex \/status$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Gemini 4 Argon$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Claude and GPT models · Claude Opus 5\.5, Claude Sonnet 5\.5, GPT-OSS 120B/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /AI credits: out of credits/ })).toBeDefined()

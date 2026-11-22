@@ -320,6 +320,15 @@ const logEvent = ($: EngineInterface, event: OrchestraEvent) =>
 const patchAgent = ($: EngineInterface, id: string, patch: Partial<OrchestraAgent>) =>
   update($, agents, all => (all[id] ? { ...all, [id]: { ...all[id], ...patch } } : all))
 
+/** Sets what an agent does now and keeps its last 6 steps for a Haiku status. */
+const setDoing = ($: EngineInterface, id: string, doing: string) =>
+  update($, agents, all => {
+    const a = all[id]
+    if (!a) return all
+    const recent = a.recent?.at(-1) === doing ? a.recent : [...(a.recent ?? []), doing].slice(-6)
+    return { ...all, [id]: { ...a, doing, recent } }
+  })
+
 // --- Haiku relay --------------------------------------------------------------
 
 const RELAY_RULES = `You relay messages between coding agents from different vendors (Claude, Codex, Gemini, OpenCode, Copilot, Kimi). Rewrite the input as the shortest message that keeps every fact its reader needs: who must do what, decisions, and every file path, identifier, number, command and error text exactly as written. No greeting, no commentary, no headings. Answer with the message only.`
@@ -354,7 +363,25 @@ const resolveRecipient = async ($: EngineInterface, to: string) => {
   const wanted = splitGroup(to).label.toLowerCase()
   const everyone = Object.values(await read($, agents))
   const names = ['orchestrator', 'you', ...everyone.map(a => a.label), ...everyone.map(a => a.group), ...Object.keys(await read($, groups))]
-  return names.find(n => n.toLowerCase() === wanted) ?? names.find(n => n.toLowerCase().includes(wanted) || wanted.includes(n.toLowerCase())) ?? splitGroup(to).label
+  const exact = names.find(n => n.toLowerCase() === wanted)
+  if (exact !== undefined) return exact
+  // A partial name counts only when it points at one name: "ui" must not land on "Build".
+  const partial = [...new Set(names.filter(n => n !== '' && (n.toLowerCase().includes(wanted) || wanted.includes(n.toLowerCase()))))]
+  return partial.length === 1 ? partial[0]! : splitGroup(to).label
+}
+
+/** Hands a note to the running Claude subagents it names (one agent, or a group's members): the board alone reaches only those who read it. */
+const deliver = async ($: EngineInterface, note: OrchestraNote) => {
+  if (note.to === undefined) return
+  const targets = Object.values(await read($, agents)).filter(
+    a => a.provider === 'claude' && a.isRunning && a.label !== note.from && (a.label === note.to || a.group === note.to),
+  )
+  // A finished subagent would be resumed (and paid for) by a send, so only running ones get it.
+  for (const a of targets) {
+    // An earlier send can take long enough for this one to finish meanwhile.
+    if (!(await read($, agents))[a.id]?.isRunning) continue
+    await $.session.send({ to: { agentId: a.id }, text: `[orchestra board] ${note.from} → ${note.to}: ${note.text}` }).catch(() => undefined)
+  }
 }
 
 const postNote = async ($: EngineInterface, note: OrchestraNote) => {
@@ -362,7 +389,30 @@ const postNote = async ($: EngineInterface, note: OrchestraNote) => {
   const clean = { ...note, text: relayed.text.slice(0, 500), ...(relayed.relayed ? { relayed: true } : {}) }
   await update($, notes, list => [...list, clean].slice(-50))
   await logEvent($, { kind: 'note', ...clean })
+  await deliver($, clean)
   await writeBoardFile($).catch(() => {})
+}
+
+/** One line on where an agent stands, written by Haiku from what the mod saw it do; the agent itself spends nothing. */
+const haikuStatus = async ($: EngineInterface, a: OrchestraAgent) => {
+  const edited = Object.entries(await read($, touches)).filter(([, by]) => by[a.id]?.role === 'edits').map(([p]) => fileName(p))
+  const facts = `Agent "${a.label}" (${PROVIDER_NAMES[a.provider]} ${short(a.model)}), ${a.isRunning ? 'running' : 'finished'}.
+Task: ${a.task}
+Last steps: ${(a.recent ?? [a.doing]).join(' | ')}
+Files edited: ${edited.join(', ') || 'none'}
+Context: ${kTokens(a.tokens)}/${kTokens(a.window)}`
+  const answer = await $.model
+    .complete({
+      model: 'haiku',
+      effort: 'low',
+      maxTokens: 120,
+      timeoutMs: 20_000,
+      system: `${RELAY_RULES} Say in one line where this agent stands: done, doing, blocked on. Keep file names exact. Guess nothing the facts do not show.`,
+      prompt: facts,
+    })
+    .catch(() => undefined)
+  const text = answer?.isAnswered && answer.text.trim() ? oneLine(answer.text, 240) : `${a.isRunning ? 'now' : 'last'}: ${a.doing}`
+  await postNote($, { from: a.label, to: 'you', text: `status: ${text}`, relayed: answer?.isAnswered === true })
 }
 
 // The function, method or class a snippet of code defines or sits in, for "edits fetchMenu()".
@@ -645,7 +695,7 @@ const parseCopilotQuota = (json: string, now: number): OrchestraQuota | undefine
     windows: p.unlimited ? [] : [{ kind: 'month', percentUsed: 100 - Number(p.percent_remaining ?? 100), ...(reset ? { resetsAt: new Date(reset).toISOString() } : {}) }],
     credits: p.unlimited ? 'unlimited premium requests' : `${p.remaining}/${p.entitlement} premium requests left`,
     ...(d.copilot_plan ? { plan: d.copilot_plan } : {}),
-    source: 'GitHub /copilot_internal/user (gh api)',
+    source: 'gh api /copilot_internal/user',
     at: now,
   }
 }
@@ -750,7 +800,7 @@ const parseCodexStatus = (text: string, now: number): OrchestraQuota | undefined
   }
   if (windows.size === 0) return undefined
   const plan = /Account:\s*\S+\s*\(([^)]+)\)/.exec(text)?.[1]
-  return { windows: [...windows.values()], ...(plan ? { plan } : {}), source: 'codex /status (hidden terminal)', at: now }
+  return { windows: [...windows.values()], ...(plan ? { plan } : {}), source: 'codex /status', at: now }
 }
 
 // "CLAUDE AND GPT MODELS" reads "Claude and GPT models", "GEMINI 4 ARGON" "Gemini 4 Argon".
@@ -777,7 +827,7 @@ const parseAgyUsage = (text: string, now: number): OrchestraQuota | undefined =>
   })
   if (groups.length === 0) return undefined
   const credits = [...text.matchAll(/AI:\s*([A-Za-z][A-Za-z ]{0,30}?)(?=\s*(?:·|│|\d|$))/g)].at(-1)?.[1]
-  return { windows: [], groups, ...(credits ? { credits: `AI credits: ${credits.toLowerCase()}` } : {}), source: 'agy /usage (hidden terminal)', at: now }
+  return { windows: [], groups, ...(credits ? { credits: `AI credits: ${credits.toLowerCase()}` } : {}), source: 'agy /usage', at: now }
 }
 
 /** Kimi /usage: only its "Plan usage" box is about the account. */
@@ -785,7 +835,7 @@ const parseKimiUsage = (text: string, now: number): OrchestraQuota | undefined =
   const i = text.lastIndexOf('Plan usage')
   if (i < 0) return undefined
   const note = oneLine(text.slice(i + 'Plan usage'.length).split(/╰/)[0]?.replace(/[│╭╮╯─]/g, ' ') ?? '', 120)
-  return { windows: [], ...(note ? { note } : {}), source: 'kimi /usage (hidden terminal)', at: now }
+  return { windows: [], ...(note ? { note } : {}), source: 'kimi /usage', at: now }
 }
 
 /** "Gemini 3.8 Flash" names the ids gemini-3.8-flash-*. */
@@ -830,6 +880,14 @@ const readQuotas = async ($: EngineInterface) => {
     if (full?.resetsAt) {
       const reason = `${LIMIT_NAMES[full.kind] ?? full.kind} limit used up`
       await changeBlocks($, blocks => ({ ...blocks, [provider]: { reason, until: Date.parse(full.resetsAt!), kind: 'limit', at: q!.at } }))
+    } else if (q !== undefined && q.windows.length > 0 && q.windows.every(w => current(w, now).percentUsed < 100)) {
+      // Room again in a reading taken after the refusal: its limit block no longer holds (an older reading proves nothing).
+      await changeBlocks($, blocks => {
+        const b = blocks[provider]
+        if (b === undefined || b.kind !== 'limit' || (b.at ?? Infinity) >= q.at) return blocks
+        const { [provider]: _, ...rest } = blocks
+        return rest
+      })
     }
   }
   if (agy?.groups) {
@@ -860,14 +918,29 @@ const readQuotas = async ($: EngineInterface) => {
 const current = (l: OrchestraLimit, now: number): OrchestraLimit =>
   l.resetsAt !== undefined && Date.parse(l.resetsAt) <= now ? { kind: l.kind, percentUsed: 0 } : l
 
-/** One line per CLI for the routing prompt: what is used and when it resets. */
+/**
+ * One line per CLI for the routing prompt: used share in steps of 10 and the reset only near the limit.
+ * The prompt sits before the whole conversation in the cache, so every change of its text makes the next
+ * request write the entire context again; exact percents and reading times would do that every few minutes.
+ */
 const usageLines = (claude: OrchestraLimit[], q: Partial<Record<OrchestraExternal, OrchestraQuota>>, premium: number, now: number) => {
   const windows = (ls: OrchestraLimit[]) =>
-    ls.map(w => current(w, now)).map(l => `${LIMIT_NAMES[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}% used${l.resetsAt ? ` (resets ${clockAt(Date.parse(l.resetsAt), now)})` : ''}`).join(', ')
+    ls
+      .map(w => current(w, now))
+      .map(l => {
+        const used = Math.min(100, Math.floor(l.percentUsed / 10) * 10)
+        const reset = used >= 80 && l.resetsAt ? ` (resets ${clockAt(Date.parse(l.resetsAt), now)})` : ''
+        return `${LIMIT_NAMES[l.kind] ?? l.kind} ${used >= 100 ? 'used up' : `${used}%+ used`}${reset}`
+      })
+      .join(', ')
+  const copilotLeft = (credits: string | undefined) => {
+    const m = /^(\d+)\/(\d+)/.exec(credits ?? '')
+    return m ? `about ${Math.floor((Number(m[1]) / Math.max(1, Number(m[2]))) * 10) * 10}% of ${m[2]} premium requests left` : credits
+  }
   return [
     claude.length > 0 ? `- claude: ${windows(claude)}` : '',
-    q.codex ? `- codex: ${windows(q.codex.windows)}${q.codex.credits ? `, ${q.codex.credits}` : ''} (as of ${clockAt(q.codex.at, now)})` : '',
-    q.copilot ? `- copilot: ${q.copilot.credits}` : `- copilot: ${premium} premium requests spent this month (counted by the mod)`,
+    q.codex ? `- codex: ${windows(q.codex.windows)}${q.codex.credits ? `, ${q.codex.credits}` : ''}` : '',
+    q.copilot ? `- copilot: ${copilotLeft(q.copilot.credits)}${q.copilot.windows.some(w => current(w, now).percentUsed >= 80) ? `, ${windows(q.copilot.windows)}` : ''}` : `- copilot: ${Math.floor(premium / 10) * 10}+ premium requests spent this month (counted by the mod)`,
     ...(q.agy?.groups ?? []).map(g => `- agy ${g.name} (${g.models.join(', ')}): ${windows(g.windows)}`),
     q.agy?.credits ? `- agy: ${q.agy.credits}` : '',
     q.kimi?.note ? `- kimi plan usage: ${q.kimi.note}` : '',
@@ -1114,7 +1187,7 @@ Files you own: ${owned.length > 0 ? owned.join(', ') : 'none named; change only 
 ${input.write === false ? 'This is a read-only task: change no files.\n' : ''}Files other agents hold right now (do not edit them): ${held.filter(([, c]) => c.label !== label).map(([p, c]) => `${p} (${c.label})`).join(', ') || 'none'}.
 Other agents running: ${live.map(a => `${a.label} [${PROVIDER_NAMES[a.provider]}] ${oneLine(a.task, 80)}`).join('; ') || 'none'}.
 Notes for you: ${allNotes.filter(n => n.to === label || n.to === group).map(line).join(' | ') || 'none'}.
-Recent board: ${allNotes.slice(-8).map(line).join(' | ') || 'empty'}.
+Recent board: ${allNotes.slice(-8).map(n => oneLine(line(n), 200)).join(' | ') || 'empty'}.
 
 Shared board file: ${BOARD_FILE} (who holds which file, notes, other agents' reports in ${DIR}/reports/). It is rewritten as the team works: read it before you start, before you edit a file another agent may touch, and again before you finish.
 
@@ -1153,8 +1226,8 @@ const runExternal = async ($: EngineInterface, id: string, input: DelegateInput,
     if (fact.error) error = fact.error
     const patch: Partial<OrchestraAgent> = {}
     if (fact.doing) {
-      patch.doing = oneLine(fact.doing, 90)
-      trail.push(oneLine(fact.doing, 160))
+      await setDoing($, id, oneLine(fact.doing, 90))
+      if (trail.at(-1) !== oneLine(fact.doing, 160)) trail.push(oneLine(fact.doing, 160))
       if (trail.length > 40) trail.shift()
     }
     if (fact.tokens) patch.tokens = fact.tokens
@@ -1283,7 +1356,7 @@ ${exitFailed && stderr.trim() ? `\n## stderr (tail)\n\`\`\`\n${stderr.trim().sli
   void loadQuotas($).catch(() => {})
   if (from === 'orchestrator') {
     await $.prompt.submit({
-      text: `orchestra: external agent "${label}" (${PROVIDER_NAMES[provider]} ${agent?.model ?? ''}, effort ${agent?.effort ?? '-'}) ${failed ? `failed: ${why}` : 'finished'}${input.retriedFrom ? ` after ${input.retriedFrom} was refused` : ''}. Full report: ${reportPath}${reader !== from ? ` (addressed to ${reader})` : ''}.${reviewLine}\n\n${digest.relayed ? `Haiku digest (read the file for detail):\n${digest.text}` : report.slice(0, 4000) || '(no report)'}`,
+      text: `orchestra: external agent "${label}" (${PROVIDER_NAMES[provider]} ${agent?.model ?? ''}, effort ${agent?.effort ?? '-'}) ${failed ? `failed: ${why}` : 'finished'}${input.retriedFrom ? ` after ${input.retriedFrom} was refused` : ''}. Full report: ${reportPath}${reader !== from ? ` (addressed to ${reader})` : ''}.${reviewLine}\n\n${digest.relayed ? `Haiku digest (read the file for detail):\n${digest.text}` : (report.length > 1500 ? `${report.slice(0, 1500)}… (rest in the file)` : report) || '(no report)'}`,
     })
   }
 }
@@ -1586,7 +1659,10 @@ export const register: Register = on => {
     }
     const all = await read($, notes)
     const line = (n: OrchestraNote) => `${n.from}${n.to ? ` → ${n.to}` : ''}: ${n.text}`
-    const forMe = all.filter(n => n.to === label || (me !== undefined && n.to === me.group)).slice(-10).map(line)
+    const mine = all.filter(n => n.to === label || (me !== undefined && n.to === me.group)).slice(-10)
+    const forMe = mine.map(line)
+    // What is already under "For you" is not repeated; the rest of the board is the last 8 notes, one line each.
+    const others = all.filter(n => !mine.includes(n)).slice(-8).map(n => oneLine(line(n), 200))
     const everyone = Object.values(await read($, agents))
     const declared = await read($, groups)
     const goals = [...new Set([...Object.keys(declared), ...everyone.map(a => a.group)])].map(
@@ -1597,7 +1673,7 @@ export const register: Register = on => {
       .filter(a => a.isRunning)
       .map(a => `${a.group} / ${a.label} [${PROVIDER_NAMES[a.provider]} ${short(a.model)}]: ${a.doing}`)
     return {
-      result: `For you:\n${forMe.join('\n') || '(none)'}\n\nGroups:\n${goals.join('\n') || '(none)'}\n\nRunning agents:\n${running.join('\n') || '(none)'}\n\nClaimed files:\n${held.join('\n') || '(none)'}\n\nNotes:\n${all.slice(-15).map(line).join('\n') || '(none)'}`,
+      result: `For you:\n${forMe.join('\n') || '(none)'}\n\nGroups:\n${goals.join('\n') || '(none)'}\n\nRunning agents:\n${running.join('\n') || '(none)'}\n\nClaimed files:\n${held.join('\n') || '(none)'}\n\nOther notes:\n${others.join('\n') || '(none)'}`,
     }
   })
 
@@ -1626,7 +1702,7 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     const input = e as unknown as Record<string, unknown>
     const me = e.agentId
-    if (me !== undefined) await patchAgent($, me, { doing: describe(e.tool, input) })
+    if (me !== undefined) await setDoing($, me, describe(e.tool, input))
 
     const readField = READ_TOOLS[String(e.tool)]
     const readPath = readField === undefined ? undefined : input[readField]
@@ -1746,7 +1822,7 @@ export const register: Register = on => {
       codex: 'no reading yet: codex /status runs in a hidden terminal',
       agy: 'no reading yet: agy /usage runs in a hidden terminal',
       opencode: 'free models: no quota, shows its last refusal',
-      copilot: 'gh api gave no reading: premium requests counted by the mod (above)',
+      copilot: `${premium} premium request${premium === 1 ? '' : 's'} this month · counted by the mod (gh api gave no reading)`,
       kimi: 'no reading yet: kimi /usage runs in a hidden terminal',
     }
     const liveBlock = (key: string) => {
@@ -1816,7 +1892,7 @@ export const register: Register = on => {
           {modelBlocks.length > 6 && <Text dimColor>{'  '}…and {modelBlocks.length - 6} more blocked</Text>}
           <Text dimColor>
             {'  '}
-            {q ? `from ${q.source} · read ${clockAt(q.at, now)}` : NO_USAGE[p]}
+            {q ? `read ${clockAt(q.at, now)} from ${q.source}` : NO_USAGE[p]}
           </Text>
         </Box>
       )
@@ -1951,25 +2027,26 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {card(
-          'Usage',
-          'live',
-          plan.length === 0 ? <Text dimColor>No reading yet (shows after the first reply on a subscription).</Text> : plan.map(limitRow),
+          '◔ Usage',
+          'live · routing skips what is used up until it resets',
+          <Text>
+            <Text bold color={PROVIDER_COLOR.claude}>
+              Claude
+            </Text>
+            <Text dimColor> this chat's plan</Text>
+          </Text>,
+          plan.length === 0 ? <Text dimColor>{'  '}No reading yet (shows after the first reply on a subscription).</Text> : plan.map(l => <Box paddingLeft={2}>{limitRow(l)}</Box>),
           top === null ? (
-            <Text dimColor>Chat  no request yet</Text>
+            <Text dimColor>{'  '}Chat  no request yet</Text>
           ) : (
             <Text>
-              Chat {'  '}
+              {'  '}Chat {'  '}
               <Text color={top.tokens / Math.max(1, top.window) >= 0.8 ? 'yellow' : 'cyan'}>{bar(top.tokens, top.window)}</Text> {kTokens(top.tokens)}/
               {kTokens(top.window)} ({pct(top.tokens, top.window)}){top.model !== '' && <Text dimColor> · {short(top.model)} · effort {top.effort}</Text>}
             </Text>
           ),
-          premium > 0 && (
-            <Text dimColor>
-              Copilot {premium} premium request{premium === 1 ? '' : 's'} this month
-            </Text>
-          ),
+          EXTERNAL.map(quotaBlock),
         )}
-        {card('◔ Quotas', 'by CLI · routing skips what is used up until it resets', EXTERNAL.map(quotaBlock))}
         {card(
           'Orchestra',
           `${lean ? 'lean · ' : ''}${running.length} running${PROVIDER_ORDER.map(p => {
@@ -2051,11 +2128,14 @@ export const register: Register = on => {
               <Text> </Text>
               {thread.length === 0 ? <Text dimColor>No messages to or from it.</Text> : thread.map(noteRow)}
               <Box flexDirection="row" gap={1} marginTop={1}>
-                <Button
-                  key="team-status"
-                  label="Ask for status"
-                  onPress={() => void postNote($, { from: 'you', to: picked.label, text: 'Post a one-line status on the board: done, doing, blocked on.' })}
-                />
+                <Button key="team-status" label="Status (Haiku)" onPress={() => void haikuStatus($, picked).catch(() => {})} />
+                {picked.isRunning && picked.provider === 'claude' && (
+                  <Button
+                    key="team-ask"
+                    label="Ask the agent"
+                    onPress={() => void postNote($, { from: 'you', to: picked.label, text: 'Post a one-line status on the board: done, doing, blocked on.' })}
+                  />
+                )}
                 {picked.isRunning && picked.provider !== 'claude' && (
                   <Button
                     key="team-stop"

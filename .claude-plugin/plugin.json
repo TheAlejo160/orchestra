@@ -1,6 +1,6 @@
 {
   "name": "orchestra",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Routes work by difficulty and cost to Claude subagents and to external CLI agents: Codex (newest models only), Antigravity (Gemini 4 Hydrogen and Argon, and Claude and GPT-OSS on its own quota), OpenCode (free DeepSeek first), GitHub Copilot (always auto) and Kimi. Guards shared files, relays long messages between agents through Haiku, and shows agents, the usage and quotas of every CLI (5-hour, weekly, credits, resets) and a Team pane to see and message who works with whom",
   "author": {
     "name": "TheAlejo160",
