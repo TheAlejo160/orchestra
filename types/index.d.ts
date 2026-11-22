@@ -65,6 +65,26 @@ export type OrchestraModel = {
   efforts: string[]
   /** Why the account refused it on a recent run (plan, quota, sign-in); routing skips it until the block expires. */
   blocked?: string
+  /** When that block lapses (ms): the reset time the refusal named, or a default. */
+  blockedUntil?: number
+}
+
+export type OrchestraQuotaGroup = { name: string; models: string[]; windows: OrchestraLimit[] }
+
+/** A CLI's usage as its own source last reported it: Codex's session log, GitHub's Copilot quota. */
+export type OrchestraQuota = {
+  windows: OrchestraLimit[]
+  /** Credits or premium requests left, in the source's terms. */
+  credits?: string
+  plan?: string
+  /** Models that share their own windows (Antigravity: Gemini, Claude and GPT, Argon). */
+  groups?: OrchestraQuotaGroup[]
+  /** What the CLI says beside the numbers, e.g. "AI credits: Out of credits" or "No usage data available". */
+  note?: string
+  /** Where the numbers come from. */
+  source: string
+  /** When the source measured them (ms). */
+  at: number
 }
 
 declare module 'claude-code' {
@@ -83,6 +103,8 @@ declare module 'claude-code' {
       /** By file path, then agent id. */
       touches: Record<string, Record<string, OrchestraTouch>>
       relay: OrchestraRelay
+      /** Usage read from each CLI that exposes it; the others show only their last refusal. */
+      quotas: Partial<Record<OrchestraExternal, OrchestraQuota>>
     }
   }
 }

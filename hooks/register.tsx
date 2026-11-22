@@ -10,6 +10,7 @@ import type {
   OrchestraModel,
   OrchestraNote,
   OrchestraProvider,
+  OrchestraQuota,
   OrchestraTeamView,
   OrchestraTouch,
 } from '../types'
@@ -26,6 +27,7 @@ const groups = atom({ plugin: 'orchestra', key: 'groups' } as const, {})
 const team = atom({ plugin: 'orchestra', key: 'team' } as const, { selected: '', to: '' })
 const touches = atom({ plugin: 'orchestra', key: 'touches' } as const, {})
 const relayState = atom({ plugin: 'orchestra', key: 'relay' } as const, { isOn: true, count: 0, saved: 0 })
+const quotas = atom({ plugin: 'orchestra', key: 'quotas' } as const, {})
 
 const GENERAL = 'General'
 
@@ -144,8 +146,8 @@ const ROLE_OF: Record<OrchestraProvider, string> = {
 const TIER_MATCH: Record<Tier, RegExp> = {
   // Codex lists only its newest generation (newestPerLine), so the line name alone picks the tier.
   complex: /opus|fable|gpt-[\d.]+-(astra|sol)$|gemini-4|argon|(^|[/-])k3$/,
-  medium: /sonnet|gpt-[\d.]+-(sol|terra)$|gemini-3\.8-flash-(high|medium)$|deepseek|big-pickle|nemotron-3-ultra|glm|kimi-for-coding$|k3-256k|^auto$/,
-  small: /haiku|gemini-3\.8-flash-low$|gpt-[\d.]+-luna$|deepseek|lightning|beam|mimo|minimax|flint|super-vl|nano/,
+  medium: /sonnet|gpt-[\d.]+-(sol|terra)$|gemini-4-hydrogen-(high|medium)$|deepseek|big-pickle|nemotron-3-ultra|glm|kimi-for-coding$|k3-256k|^auto$/,
+  small: /haiku|gemini-4-hydrogen-low$|gpt-[\d.]+-luna$|deepseek|lightning|beam|mimo|minimax|flint|super-vl|nano/,
 }
 const TIER_NAMES: Record<Tier, string> = {
   complex: 'Complex (architecture, hard logic, big features, final review)',
@@ -154,30 +156,45 @@ const TIER_NAMES: Record<Tier, string> = {
 }
 const CLAUDE_TIERS: Record<Tier, string[]> = { complex: ['opus', 'fable (only the highest stakes)'], medium: ['sonnet'], small: ['haiku'] }
 
+// The person's call: agy never runs Gemini 3.8 Flash (any effort) by recommendation or fallback; Gemini 4 Hydrogen
+// is better, faster and costs about the same. An explicit request for Flash still runs.
+const NEVER_PICK: Partial<Record<OrchestraExternal, RegExp>> = { agy: /^gemini-3\.8-flash/ }
+const neverPick = (m: OrchestraModel) => NEVER_PICK[m.provider]?.test(m.id) ?? false
+// What a refused model of that CLI falls back to first, in order.
+const FALLBACK_FIRST: Partial<Record<OrchestraExternal, string[]>> = {
+  agy: ['gemini-4-hydrogen-high', 'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low'],
+}
+
 const tierLine = (all: OrchestraModel[], tier: Tier) => {
-  const external = all.filter(m => m.blocked === undefined && TIER_MATCH[tier].test(m.id)).map(m => `${m.provider}:${m.id}`)
+  const external = all.filter(m => m.blocked === undefined && !neverPick(m) && TIER_MATCH[tier].test(m.id)).map(m => `${m.provider}:${m.id}`)
   return `- ${TIER_NAMES[tier]}: ${[...CLAUDE_TIERS[tier].map(a => `claude:${a}`), ...external].join(', ')}`
 }
 
-const modelList = (all: OrchestraModel[], provider: OrchestraExternal) => {
+const modelList = (all: OrchestraModel[], provider: OrchestraExternal, now = 0) => {
   const mine = all.filter(m => m.provider === provider)
   if (mine.length === 0) return 'not installed or not signed in on this machine; do not use it.'
-  const open = mine.filter(m => m.blocked === undefined)
+  const open = mine.filter(m => m.blocked === undefined && !neverPick(m))
   const shut = mine.filter(m => m.blocked !== undefined)
-  if (open.length === 0) return `unavailable on this account right now (${shut[0]?.blocked}); do not use it.`
+  const never = mine.filter(m => m.blocked === undefined && neverPick(m))
+  // The reset is named only when it is near; a block days away is just "refused".
+  const untilNote = (m: OrchestraModel) => (m.blockedUntil !== undefined && m.blockedUntil - now < 86_400_000 ? ` until ${clockAt(m.blockedUntil, now)}` : '')
+  if (open.length === 0) return `unavailable on this account right now (${shut[0]?.blocked}${shut[0] ? untilNote(shut[0]) : ''}); do not use it.`
   // The CLI's own description, where it says more than the id, is what the orchestrator judges a model by.
   const about = (m: OrchestraModel) => (m.name && m.name.toLowerCase() !== m.id.toLowerCase() ? `, "${oneLine(m.name, 80)}"` : '')
   const listed = open.map(m => `${m.id} (${Math.round(m.window / 1000)}k${m.efforts.length > 0 ? `; effort ${m.efforts.join('|')}` : ''}${about(m)})`).join(', ')
-  return `${listed}${shut.length > 0 ? `. Refused by this account, do not use: ${shut.map(m => m.id).join(', ')}` : ''}`
+  return `${listed}${shut.length > 0 ? `. Refused by this account, do not use: ${shut.map(m => `${m.id}${untilNote(m)}`).join(', ')}` : ''}${never.length > 0 ? `. The person ruled out, never pick: ${never.map(m => m.id).join(', ')}` : ''}`
 }
 
-const routing = (all: OrchestraModel[], premium: number) => `# Orchestra
+const routing = (all: OrchestraModel[], usage: string[], now: number) => `# Orchestra
 The person installed the orchestra mod and wants work split across models by role and difficulty, to save tokens and limits. When a request has two or more independent parts, act as the orchestrator: plan the parts, give each one disjoint files, and launch the agents in one message, in the background, then integrate and verify their work. Do a small single-step task yourself.
 
 How to pick: the kind of work picks the provider, its difficulty picks the tier, and inside the tier take the cheapest model that is good enough. The tiers list only models this machine's accounts accept.
 
 What each provider is usually good for (a starting point for your judgment, not a rule):
-${PROVIDER_ORDER.map(p => `- ${p}: ${ROLE_OF[p]}${p === 'copilot' ? ` (${premium} premium requests spent this month)` : ''}`).join('\n')}
+${PROVIDER_ORDER.map(p => `- ${p}: ${ROLE_OF[p]}`).join('\n')}
+
+Usage now (the orchestra pane shows it; prefer a provider with room, a model near its limit only for short tasks):
+${usage.join('\n')}
 
 Tiers (provider:model):
 ${(['complex', 'medium', 'small'] as const).map(t => tierLine(all, t)).join('\n')}
@@ -191,11 +208,11 @@ ${ROLES.map(r => `- orchestra:${r.name} (default ${r.model}, effort ${r.effort})
 - codex:codex-rescue (OpenAI Codex), when listed: a large self-contained implementation or a second debugging opinion.
 
 External CLI agents (mcp__orchestra__delegate): they run in the background, show in the orchestra pane, claim the files you give them, read the live board in .orchestra/BOARD.md, and leave a report in .orchestra/reports/ that comes back to you as a message. Set reportTo to whoever acts on the report and review to a different provider than the author. Models on this machine:
-- codex: ${modelList(all, 'codex')}. Only the newest generation of each line is listed: never ask for an older one. Effort medium or high by default, ultra only for the hardest work; fast: true doubles speed at higher usage.
-- agy: ${modelList(all, 'agy')}. Gemini 4 Argon for hard work, Gemini 3.8 Flash for the rest, Claude Opus/Sonnet here before a Claude Code subagent, GPT-OSS for cheap drafts; the id carries its effort.
-- opencode (pass the full id): ${modelList(all, 'opencode')}. Default and first pick: the DeepSeek free model. flint is slow.
+- codex: ${modelList(all, 'codex', now)}. Only the newest generation of each line is listed: never ask for an older one. Effort medium or high by default, ultra only for the hardest work; fast: true doubles speed at higher usage.
+- agy: ${modelList(all, 'agy', now)}. Gemini 4 Argon for hard work, Gemini 4 Hydrogen (high by default) for the rest, never Gemini 3.8 Flash, Claude Opus/Sonnet here before a Claude Code subagent, GPT-OSS for cheap drafts; the id carries its effort.
+- opencode (pass the full id): ${modelList(all, 'opencode', now)}. Default and first pick: the DeepSeek free model. flint is slow.
 - copilot: always auto (Copilot picks the model from what the plan allows); do not pass model or effort.
-- kimi: ${modelList(all, 'kimi')}.
+- kimi: ${modelList(all, 'kimi', now)}.
 - A model the account refuses (plan, credits, sign-in) is marked and left out for a while, and the agent retries once on another model of that CLI by itself. delegate action "probe" (with or without provider) re-checks which models answer, at the cost of one tiny prompt each.
 
 Choosing models (judge each part; there is no fixed recipe):
@@ -243,7 +260,21 @@ const bar = (used: number, total: number) => {
   return '█'.repeat(filled) + '░'.repeat(10 - filled)
 }
 
-const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: 'Week', spend_limit: 'Spend' }
+const LIMIT_NAMES: Record<string, string> = {
+  five_hour: '5h',
+  seven_day: 'Week',
+  seven_day_opus: 'Opus',
+  seven_day_sonnet: 'Sonnet',
+  spend_limit: 'Spend',
+  month: 'Month',
+}
+
+/** Local "HH:MM", with the weekday when it is not today. */
+const clockAt = (ms: number, now: number) => {
+  const at = new Date(ms)
+  const hm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+  return at.toDateString() === new Date(now).toDateString() ? hm : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][at.getDay()]} ${hm}`
+}
 
 const PROVIDER_NAMES: Record<OrchestraProvider, string> = {
   claude: 'Claude',
@@ -268,12 +299,9 @@ const until = (ms: number) => {
 // Reset shown as local clock time (weekday too when it is not today) plus the countdown.
 const resetLabel = (resetsAt: string | undefined, now: number) => {
   if (resetsAt === undefined) return ''
-  const at = new Date(resetsAt)
-  if (Number.isNaN(at.getTime())) return ''
-  const hm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
-  const sameDay = at.toDateString() === new Date(now).toDateString()
-  const day = sameDay ? '' : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][at.getDay()]} `
-  return ` · resets ${day}${hm} (in ${until(at.getTime() - now)})`
+  const at = new Date(resetsAt).getTime()
+  if (Number.isNaN(at)) return ''
+  return ` · resets ${clockAt(at, now)} (in ${until(at - now)})`
 }
 
 const describe = (tool: string, input: Record<string, unknown>) => {
@@ -498,13 +526,16 @@ const countPremium = async ($: EngineInterface, n: number) => {
 }
 
 /** Account refusals, by "provider" or "provider:model", kept across sessions until they lapse. */
-type Blocks = Record<string, { reason: string; until: number }>
+/** kind: limit (a usage window, lifts at its reset), credits (balance spent), refused (plan or sign-in); at: when it was seen. */
+type BlockKind = 'limit' | 'credits' | 'refused'
+type Block = { reason: string; until: number; kind?: BlockKind; at?: number }
+type Blocks = Record<string, Block>
 
 const applyBlocks = (models: OrchestraModel[], blocks: Blocks, now: number): OrchestraModel[] =>
-  models.map(({ blocked: _, ...m }) => {
+  models.map(({ blocked: _, blockedUntil: _u, ...m }) => {
     // A lapsed model block must not hide a live block on its whole CLI.
     const b = [blocks[`${m.provider}:${m.id}`], blocks[m.provider]].find(x => x !== undefined && now < x.until)
-    return b ? { ...m, blocked: b.reason } : m
+    return b ? { ...m, blocked: b.reason, blockedUntil: b.until } : m
   })
 
 const readBlocks = async ($: EngineInterface) => ((await $.store.get('blocked')) as Blocks | undefined) ?? {}
@@ -528,28 +559,326 @@ const changeBlocks = ($: EngineInterface, change: (blocks: Blocks) => Blocks) =>
 const liveCatalog = async ($: EngineInterface) => applyBlocks(await read($, catalog), await readBlocks($), await $.clock.now())
 
 // The line of a failed run that says the account refused it.
-const REFUSAL = /not available|unavailable|no-route|subscription|auth_error|unauthori[sz]ed|forbidden|\b40[13]\b|not logged in|log ?in required|credits|exhausted|quota|rate.?limit/i
-// Refusals that cover the whole account rather than the one model.
-const ACCOUNT_WIDE = /subscription|auth_error|unauthori[sz]ed|\b401\b|not logged in|log ?in required/i
+const REFUSAL =
+  /not available|unavailable|no-route|subscription|auth_error|unauthori[sz]ed|forbidden|\b40[13]\b|not logged in|log ?in required|credits|exhausted|quota|rate.?limit|usage limit|too many requests|\b429\b|\blimit\b.*\breset/i
+// Refusals that cover the whole account rather than the one model. A plan's usage limit (Codex: "You've hit your usage limit") covers every model on it.
+const ACCOUNT_WIDE = /subscription|auth_error|unauthori[sz]ed|\b401\b|not logged in|log ?in required|usage limit/i
 // Refusals that lift by themselves; the rest (plan, credits) last until the account changes or a probe sees the model answer.
-const TRANSIENT = /rate.?limit|quota|service unavailable|\b50[23]\b/i
+const TRANSIENT = /rate.?limit|quota|usage limit|too many requests|\b429\b|\blimit\b.*\breset|service unavailable|\b50[23]\b/i
+// A usage window comes first: Codex's limit message also mentions buying credits.
+const kindOf = (line: string): BlockKind =>
+  TRANSIENT.test(line) ? 'limit' : /credit|balance|billing|payment/i.test(line) ? 'credits' : 'refused'
 
-/** Marks the model, or the whole CLI when the refusal is account-wide, so routing stops offering it. */
+/**
+ * The reset a refusal names, as ms: "try again at 4:06 AM", "resets 2:40am", "try again in 3h 20m",
+ * "retry after 30 seconds", or an ISO time. A bare clock time is its next occurrence in local time.
+ */
+const resetIn = (text: string, now: number) => {
+  const iso = /\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:?\d\d)?/i.exec(text)
+  if (iso && !Number.isNaN(Date.parse(iso[0])) && Date.parse(iso[0]) > now) return Date.parse(iso[0])
+  const clock = /(?:again at|resets?(?: at)?|until|after)\s+(\d{1,2})(?::(\d\d))?\s*([ap])\.?m\b|(?:again at|resets?(?: at)?|until)\s+(\d{1,2}):(\d\d)\b/i.exec(text)
+  if (clock) {
+    const pm = clock[3]?.toLowerCase()
+    const hour = Number(clock[1] ?? clock[4]) % (pm ? 12 : 24) + (pm === 'p' ? 12 : 0)
+    const at = new Date(now)
+    at.setHours(hour, Number(clock[2] ?? clock[5] ?? 0), 0, 0)
+    return at.getTime() > now ? at.getTime() : at.getTime() + 86_400_000
+  }
+  const rel = /(?:in|after)\s+((?:\d+\s*(?:days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,and]*)+)/i.exec(text)
+  if (rel?.[1]) {
+    const unit: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 }
+    const ms = [...rel[1].matchAll(/(\d+)\s*([dhms])/gi)].reduce((sum, [, n, u]) => sum + Number(n) * (unit[(u ?? '').toLowerCase()] ?? 0), 0)
+    if (ms > 0) return now + ms
+  }
+  return undefined
+}
+
+/** Marks the model, or the whole CLI when the refusal is account-wide, so routing stops offering it until the reset it names. */
 const blockRefused = async ($: EngineInterface, provider: OrchestraExternal, model: string, text: string) => {
   const line = text.split(/\n|; /).find(l => REFUSAL.test(l))
   if (line === undefined) return undefined
   const wide = ACCOUNT_WIDE.test(line)
   // A refusal of the CLI's default model that says nothing about the account cannot tell which model to leave out.
   if (!wide && model === 'default') return undefined
-  const until = (await $.clock.now()) + (TRANSIENT.test(line) ? 2 : 72) * 3_600_000
+  const now = await $.clock.now()
+  const kind = kindOf(line)
+  const until = resetIn(line, now) ?? now + (kind === 'limit' ? 2 : 72) * 3_600_000
   const reason = oneLine(line.replace(/^(error:\s*)+/i, ''), 90)
-  await changeBlocks($, blocks => ({ ...blocks, [wide ? provider : `${provider}:${model}`]: { reason, until } }))
+  await changeBlocks($, blocks => ({ ...blocks, [wide ? provider : `${provider}:${model}`]: { reason, until, kind, at: now } }))
   return wide ? ('provider' as const) : ('model' as const)
+}
+
+// --- Usage each CLI exposes -------------------------------------------------------------------------
+
+// Codex writes its plan's windows into every session log; the newest log that has them is the last reading.
+const CODEX_LIMITS = `setopt nullglob; for f in $HOME/.codex/sessions/*/*/*/rollout-*.jsonl(.om[1,30]); do l=$(grep '"rate_limits":{' "$f" | grep -v '"primary":null' | tail -1); [ -n "$l" ] && { print -r -- "$l"; exit 0 }; done; exit 1`
+
+const windowKind = (minutes: number) =>
+  minutes === 300 ? 'five_hour' : minutes === 10_080 ? 'seven_day' : minutes % 1440 === 0 ? `${minutes / 1440}d` : `${Math.round(minutes / 60)}h`
+
+const parseCodexLimits = (line: string, now: number): OrchestraQuota | undefined => {
+  const ev = JSON.parse(line) as { timestamp?: string; payload?: { rate_limits?: any }; rate_limits?: any }
+  const r = ev.payload?.rate_limits ?? ev.rate_limits
+  if (!r) return undefined
+  type W = { used_percent?: number; window_minutes?: number; resets_at?: number } | null
+  const win = (w: W) =>
+    w && typeof w.used_percent === 'number'
+      ? [{ kind: windowKind(w.window_minutes ?? 0), percentUsed: w.used_percent, ...(w.resets_at ? { resetsAt: new Date(w.resets_at * 1000).toISOString() } : {}) }]
+      : []
+  const c = r.credits
+  return {
+    windows: [...win(r.primary), ...win(r.secondary)],
+    ...(c?.unlimited ? { credits: 'unlimited credits' } : c?.has_credits ? { credits: `${c.balance} credits` } : {}),
+    ...(r.plan_type ? { plan: String(r.plan_type) } : {}),
+    source: '~/.codex/sessions (last Codex run)',
+    at: Date.parse(ev.timestamp ?? '') || now,
+  }
+}
+
+// shortcut: /copilot_internal/user is the endpoint GitHub's own editors read; undocumented, so a failure falls back to the mod's own count.
+const parseCopilotQuota = (json: string, now: number): OrchestraQuota | undefined => {
+  const d = JSON.parse(json) as { copilot_plan?: string; quota_reset_date_utc?: string; quota_reset_date?: string; quota_snapshots?: Record<string, any> }
+  const p = d.quota_snapshots?.premium_interactions
+  if (!p) return undefined
+  const reset = d.quota_reset_date_utc ?? d.quota_reset_date
+  return {
+    windows: p.unlimited ? [] : [{ kind: 'month', percentUsed: 100 - Number(p.percent_remaining ?? 100), ...(reset ? { resetsAt: new Date(reset).toISOString() } : {}) }],
+    credits: p.unlimited ? 'unlimited premium requests' : `${p.remaining}/${p.entitlement} premium requests left`,
+    ...(d.copilot_plan ? { plan: d.copilot_plan } : {}),
+    source: 'GitHub /copilot_internal/user (gh api)',
+    at: now,
+  }
+}
+
+// Runs a CLI's interactive screen in a hidden pseudo-terminal from the home folder, types its usage command, presses Enter
+// and prints the screen as plain text. Exit 3: the screen showed a prompt (update, folder trust, sign-in) where Enter would
+// do something else, so nothing was pressed. argv: ready-seconds command after-seconds cli args...
+const PTY_USAGE = String.raw`
+import os, pty, re, select, signal, sys, time, fcntl, termios, struct
+ready, text, after = float(sys.argv[1]), sys.argv[2], float(sys.argv[3])
+argv = sys.argv[4:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ['TERM'] = 'xterm-256color'
+    os.execvp(argv[0], argv)
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 50, 120, 0, 0))
+buf = b''
+def pump(most, quiet=None):
+    global buf
+    start = last = time.time()
+    while time.time() - start < most:
+        if quiet and time.time() - last > quiet and time.time() - start > 3:
+            return
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if not r:
+            continue
+        try:
+            d = os.read(fd, 65536)
+        except OSError:
+            return
+        if not d:
+            return
+        buf += d
+        last = time.time()
+        if b'\x1b[6n' in d:
+            os.write(fd, b'\x1b[1;1R')
+def plain(b):
+    t = b.decode('utf-8', 'replace')
+    t = re.sub(r'\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]|\x1b[=>78]', ' ', t)
+    return re.sub(r'\s+', ' ', re.sub(r'[\x00-\x1f\x7f]', ' ', t))
+def stop(code):
+    sys.stdout.flush()
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        os.kill(pid, signal.SIGKILL)
+    os._exit(code)
+pump(ready, 2.5)
+m = re.search(r'update available|update now|updating|do you trust|trust this folder|confirm folder trust|sign in (?:to|with)|not logged in|log ?in required|press enter to continue', plain(buf), re.I)
+if m:
+    print('BLOCKED-PROMPT: ' + m.group(0))
+    stop(3)
+mark = len(buf)
+os.write(fd, text.encode())
+pump(1.5)
+os.write(fd, b'\r')
+pump(after, 3)
+print(plain(buf[mark:]))
+stop(0)
+`
+
+/** The screen text a CLI shows for its usage command, or why it could not be read. */
+const ptyUsage = async ($: EngineInterface, cli: string[], command: string, ready = 15, after = 10) => {
+  const r = await $.process.run(
+    ['/bin/zsh', '-lc', 'cd ~ && command -v "$4" >/dev/null && exec python3 -I - "$@"', 'zsh', String(ready), command, String(after), ...cli],
+    { stdin: PTY_USAGE, timeoutMs: (ready + after + 20) * 1000 },
+  )
+  return r.exitCode === 0 ? { text: r.stdout } : { blocked: r.exitCode === 3 ? oneLine(r.stdout, 80) : `exit ${r.exitCode}` }
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+
+/** "4:06 AM" or "2:53 AM on 25 Nov" (Codex /status), as the next such local time. */
+const resetAt = (s: string, now: number) => {
+  const t = /(\d{1,2}):(\d\d)\s*(?:([ap])\.?m)?/i.exec(s)
+  if (!t) return undefined
+  const pm = t[3]?.toLowerCase()
+  const at = new Date(now)
+  const day = /on (\d{1,2}) ([a-z]{3})/i.exec(s)
+  if (day) at.setMonth(MONTHS.indexOf((day[2] ?? '').toLowerCase()), Number(day[1]))
+  at.setHours((Number(t[1]) % (pm ? 12 : 24)) + (pm === 'p' ? 12 : 0), Number(t[2]), 0, 0)
+  if (at.getTime() <= now) day ? at.setFullYear(at.getFullYear() + 1) : at.setDate(at.getDate() + 1)
+  return at.getTime()
+}
+
+/** "163h 8m" from now. */
+const refreshesIn = (s: string, now: number) => {
+  const unit: Record<string, number> = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1000 }
+  const ms = [...s.matchAll(/(\d+)\s*([dhms])/gi)].reduce((sum, [, n, u]) => sum + Number(n) * (unit[(u ?? '').toLowerCase()] ?? 0), 0)
+  return ms > 0 ? now + ms : undefined
+}
+
+const iso = (ms: number | undefined) => (ms === undefined ? {} : { resetsAt: new Date(ms).toISOString() })
+
+/** Codex /status: "5h limit: [...] 0% left (resets 4:06 AM)", "Weekly limit: [...] 74% left (resets 2:53 AM on 25 Nov)". */
+const parseCodexStatus = (text: string, now: number): OrchestraQuota | undefined => {
+  const windows = new Map<string, OrchestraLimit>()
+  for (const m of text.matchAll(/(5h|Weekly) limit:?\s*\[[^\]]*\]\s*(\d+(?:\.\d+)?)%\s*(left|used)?\s*\(resets ([^)]+)\)/gi)) {
+    const kind = /^5h$/i.test(m[1] ?? '') ? 'five_hour' : 'seven_day'
+    const pct = Number(m[2])
+    windows.set(kind, { kind, percentUsed: (m[3] ?? 'left').toLowerCase() === 'used' ? pct : 100 - pct, ...iso(resetAt(m[4] ?? '', now)) })
+  }
+  if (windows.size === 0) return undefined
+  const plan = /Account:\s*\S+\s*\(([^)]+)\)/.exec(text)?.[1]
+  return { windows: [...windows.values()], ...(plan ? { plan } : {}), source: 'codex /status (hidden terminal)', at: now }
+}
+
+// "CLAUDE AND GPT MODELS" reads "Claude and GPT models", "GEMINI 4 ARGON" "Gemini 4 Argon".
+const titleCase = (s: string) =>
+  s.split(' ').map(w => (/^(AND|MODELS)$/.test(w) ? w.toLowerCase() : /^(GPT|AI|OSS)$/.test(w) ? w : w.charAt(0) + w.slice(1).toLowerCase())).join(' ')
+
+/** Antigravity /usage: each group of models with its weekly and five-hour limit remaining, and the AI credits state. */
+const parseAgyUsage = (text: string, now: number): OrchestraQuota | undefined => {
+  const start = text.lastIndexOf('Models & Quota')
+  if (start < 0) return undefined
+  const body = text.slice(start)
+  const heads = [...body.matchAll(/\b((?:[A-Z0-9][A-Z0-9.-]* )*?(?:MODELS|ARGON))\b/g)]
+  const groups = heads.flatMap((h, i) => {
+    const seg = body.slice((h.index ?? 0) + (h[0] ?? '').length, heads[i + 1]?.index ?? body.length)
+    const name = titleCase(h[1] ?? '')
+    const listed = /Models within this group:\s*(.+?)\s*(?=Weekly|Five Hour)/.exec(seg)?.[1]
+    const windows = [...seg.matchAll(/(Weekly|Five Hour) Limit(?: Remaining)?\s*\[[^\]]*\]\s*([\d.]+)%\s*(?:Refreshes in ((?:\d+\s*[dhms]\s*)+))?/gi)].map(m => ({
+      kind: /^five/i.test(m[1] ?? '') ? 'five_hour' : 'seven_day',
+      // agy shows what is left; the pane and routing speak in used.
+      percentUsed: Math.round((100 - Number(m[2])) * 100) / 100,
+      ...iso(m[3] ? refreshesIn(m[3], now) : undefined),
+    }))
+    return windows.length > 0 ? [{ name, models: listed ? listed.split(/,\s*/) : [name], windows }] : []
+  })
+  if (groups.length === 0) return undefined
+  const credits = [...text.matchAll(/AI:\s*([A-Za-z][A-Za-z ]{0,30}?)(?=\s*(?:·|│|\d|$))/g)].at(-1)?.[1]
+  return { windows: [], groups, ...(credits ? { credits: `AI credits: ${credits.toLowerCase()}` } : {}), source: 'agy /usage (hidden terminal)', at: now }
+}
+
+/** Kimi /usage: only its "Plan usage" box is about the account. */
+const parseKimiUsage = (text: string, now: number): OrchestraQuota | undefined => {
+  const i = text.lastIndexOf('Plan usage')
+  if (i < 0) return undefined
+  const note = oneLine(text.slice(i + 'Plan usage'.length).split(/╰/)[0]?.replace(/[│╭╮╯─]/g, ' ') ?? '', 120)
+  return { windows: [], ...(note ? { note } : {}), source: 'kimi /usage (hidden terminal)', at: now }
+}
+
+/** "Gemini 3.8 Flash" names the ids gemini-3.8-flash-*. */
+const slug = (s: string) => s.toLowerCase().replace(/[\s.]+/g, '-')
+
+let quotaRun: Promise<void> | undefined
+
+/**
+ * Reads the usage each CLI shows: Codex /status, agy /usage and kimi /usage in a hidden terminal, Copilot through gh,
+ * the Codex session log when its screen cannot be read. A used-up window blocks what it covers until it resets;
+ * an Antigravity group with room again lifts its models' limit and credits blocks.
+ */
+const loadQuotas = ($: EngineInterface) => {
+  quotaRun ??= readQuotas($).finally(() => (quotaRun = undefined))
+  return quotaRun
+}
+
+const readQuotas = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+  const run = async (script: string, parse: (out: string, now: number) => OrchestraQuota | undefined) => {
+    const r = await $.process.run(['/bin/zsh', '-lc', script], { timeoutMs: 20_000 })
+    return r.exitCode === 0 ? parse(r.stdout, now) : undefined
+  }
+  const screen = async (cli: string[], command: string, parse: (out: string, now: number) => OrchestraQuota | undefined) => {
+    const r = await ptyUsage($, cli, command)
+    return r.text !== undefined ? parse(r.text, now) : undefined
+  }
+  const has = new Set((await read($, catalog)).map(m => m.provider))
+  const [codexScreen, codexLog, copilot, agy, kimi] = await Promise.all([
+    has.has('codex') ? screen(['codex', '-c', 'check_for_update_on_startup=false'], '/status', parseCodexStatus).catch(() => undefined) : undefined,
+    run(CODEX_LIMITS, parseCodexLimits).catch(() => undefined),
+    run('command -v gh >/dev/null && gh api /copilot_internal/user', parseCopilotQuota).catch(() => undefined),
+    has.has('agy') ? screen(['agy'], '/usage', parseAgyUsage).catch(() => undefined) : undefined,
+    has.has('kimi') ? screen(['kimi'], '/usage', parseKimiUsage).catch(() => undefined) : undefined,
+  ])
+  const codex = codexScreen ?? codexLog
+  const fresh = { codex, copilot, agy, kimi }
+  await update($, quotas, q => ({ ...q, ...Object.fromEntries(Object.entries(fresh).filter(([, v]) => v !== undefined)) }))
+  $.ui.invalidate('ui.render')
+  for (const [provider, q] of [['codex', codex], ['copilot', copilot]] as const) {
+    const full = q?.windows.find(w => w.percentUsed >= 100 && w.resetsAt !== undefined && Date.parse(w.resetsAt) > now)
+    if (full?.resetsAt) {
+      const reason = `${LIMIT_NAMES[full.kind] ?? full.kind} limit used up`
+      await changeBlocks($, blocks => ({ ...blocks, [provider]: { reason, until: Date.parse(full.resetsAt!), kind: 'limit', at: q!.at } }))
+    }
+  }
+  if (agy?.groups) {
+    const ids = (await read($, catalog)).filter(m => m.provider === 'agy').map(m => m.id)
+    await changeBlocks($, blocks => {
+      const next = { ...blocks }
+      for (const g of agy.groups ?? []) {
+        const mine = ids.filter(id => g.models.some(name => slug(id).startsWith(slug(name))))
+        const full = g.windows.filter(w => w.percentUsed >= 100 && w.resetsAt !== undefined && Date.parse(w.resetsAt) > now)
+        const last = full.map(w => Date.parse(w.resetsAt!)).sort((a, b) => b - a)[0]
+        for (const id of mine) {
+          const key = `agy:${id}`
+          if (last !== undefined) {
+            const w = full.find(x => Date.parse(x.resetsAt!) === last)!
+            next[key] = { reason: `${g.name}: ${LIMIT_NAMES[w.kind] ?? w.kind} limit used up`, until: last, kind: 'limit', at: now }
+          } else if (next[key] && (next[key]!.kind ?? kindOf(next[key]!.reason)) !== 'refused') {
+            // The group has room again: a past limit or credits refusal no longer holds.
+            delete next[key]
+          }
+        }
+      }
+      return next
+    })
+  }
+}
+
+/** A window whose reset has passed since the reading is empty again. */
+const current = (l: OrchestraLimit, now: number): OrchestraLimit =>
+  l.resetsAt !== undefined && Date.parse(l.resetsAt) <= now ? { kind: l.kind, percentUsed: 0 } : l
+
+/** One line per CLI for the routing prompt: what is used and when it resets. */
+const usageLines = (claude: OrchestraLimit[], q: Partial<Record<OrchestraExternal, OrchestraQuota>>, premium: number, now: number) => {
+  const windows = (ls: OrchestraLimit[]) =>
+    ls.map(w => current(w, now)).map(l => `${LIMIT_NAMES[l.kind] ?? l.kind} ${Math.round(l.percentUsed)}% used${l.resetsAt ? ` (resets ${clockAt(Date.parse(l.resetsAt), now)})` : ''}`).join(', ')
+  return [
+    claude.length > 0 ? `- claude: ${windows(claude)}` : '',
+    q.codex ? `- codex: ${windows(q.codex.windows)}${q.codex.credits ? `, ${q.codex.credits}` : ''} (as of ${clockAt(q.codex.at, now)})` : '',
+    q.copilot ? `- copilot: ${q.copilot.credits}` : `- copilot: ${premium} premium requests spent this month (counted by the mod)`,
+    ...(q.agy?.groups ?? []).map(g => `- agy ${g.name} (${g.models.join(', ')}): ${windows(g.windows)}`),
+    q.agy?.credits ? `- agy: ${q.agy.credits}` : '',
+    q.kimi?.note ? `- kimi plan usage: ${q.kimi.note}` : '',
+  ].filter(Boolean)
 }
 
 /** Another open model of the same CLI and tier for a refused one; none when the tier has no other (a clear failure beats a weaker model). */
 const fallbackFor = (all: OrchestraModel[], provider: OrchestraExternal, refused: string) => {
-  const open = all.filter(m => m.provider === provider && m.blocked === undefined && m.id !== refused)
+  const open = all.filter(m => m.provider === provider && m.blocked === undefined && m.id !== refused && !neverPick(m))
+  const first = FALLBACK_FIRST[provider]?.map(id => open.find(m => m.id === id)).find(m => m !== undefined)
+  if (first !== undefined) return first
   const tiers = (Object.keys(TIER_MATCH) as Tier[]).filter(t => TIER_MATCH[t].test(refused))
   return tiers.length > 0 ? open.find(m => tiers.some(t => TIER_MATCH[t].test(m.id))) : open[0]
 }
@@ -951,6 +1280,7 @@ ${exitFailed && stderr.trim() ? `\n## stderr (tail)\n\`\`\`\n${stderr.trim().sli
   }
   await writeBoardFile($).catch(() => {})
   await showStatus($)
+  void loadQuotas($).catch(() => {})
   if (from === 'orchestrator') {
     await $.prompt.submit({
       text: `orchestra: external agent "${label}" (${PROVIDER_NAMES[provider]} ${agent?.model ?? ''}, effort ${agent?.effort ?? '-'}) ${failed ? `failed: ${why}` : 'finished'}${input.retriedFrom ? ` after ${input.retriedFrom} was refused` : ''}. Full report: ${reportPath}${reader !== from ? ` (addressed to ${reader})` : ''}.${reviewLine}\n\n${digest.relayed ? `Haiku digest (read the file for detail):\n${digest.text}` : report.slice(0, 4000) || '(no report)'}`,
@@ -986,6 +1316,7 @@ const probeModels = async ($: EngineInterface, only?: OrchestraExternal) => {
       }),
     )
   }
+  await loadQuotas($).catch(() => {})
   return lines.sort().join('\n') || '(no models to probe)'
 }
 
@@ -1122,6 +1453,9 @@ export const register: Register = on => {
     }
     // Keeps the reset countdowns current between measurements.
     $.clock.every(60_000, () => $.ui.invalidate('ui.render'))
+    // Each CLI's own usage screen, read in a hidden terminal: now, then every 15 minutes and after each run.
+    void loadQuotas($).catch(() => {})
+    $.clock.every(900_000, () => void loadQuotas($).catch(() => {}))
 
     return next(e)
   })
@@ -1157,7 +1491,8 @@ export const register: Register = on => {
 
   on('prompt.compose', async ($, e, next) => {
     const { sections } = await next(e)
-    const text = routing(await liveCatalog($), await premiumUsed($))
+    const now = await $.clock.now()
+    const text = routing(await liveCatalog($), usageLines(await read($, limits), await read($, quotas), await premiumUsed($), now), now)
     const lean = (await isLean($)) ? [{ id: 'orchestra:lean', text: LEAN_ORCHESTRATOR, scope: 'session' as const }] : []
     return { sections: [...sections, { id: 'orchestra:routing', text, scope: 'session' as const }, ...lean] }
   })
@@ -1401,6 +1736,92 @@ export const register: Register = on => {
       )
     }
 
+    // --- Quotas: each CLI's usage, or its last refusal where it exposes none --------
+    const cat = await liveCatalog($).catch(() => [] as OrchestraModel[])
+    const blocks = await readBlocks($).catch((): Blocks => ({}))
+    const usageBy = await read($, quotas)
+    const KIND_LABEL: Record<BlockKind, string> = { limit: 'limited', credits: 'out of credits', refused: 'refused' }
+    const KIND_COLOR: Record<BlockKind, string> = { limit: 'yellow', credits: 'red', refused: 'red' }
+    const NO_USAGE: Record<OrchestraExternal, string> = {
+      codex: 'no reading yet: codex /status runs in a hidden terminal',
+      agy: 'no reading yet: agy /usage runs in a hidden terminal',
+      opencode: 'free models: no quota, shows its last refusal',
+      copilot: 'gh api gave no reading: premium requests counted by the mod (above)',
+      kimi: 'no reading yet: kimi /usage runs in a hidden terminal',
+    }
+    const liveBlock = (key: string) => {
+      const b = blocks[key]
+      return b !== undefined && now < b.until ? b : undefined
+    }
+    const blockLine = (name: string, b: Block) => {
+      const kind = b.kind ?? kindOf(b.reason)
+      // A limit lifts at its reset; a plan or credits block lifts when a probe sees the model answer, or at its default end.
+      const lifts = kind === 'limit' || b.until - now < 86_400_000 ? `until ${clockAt(b.until, now)} (in ${until(b.until - now)})` : `until a probe answers, or ${clockAt(b.until, now)}`
+      return (
+        <Text>
+          {'  '}
+          <Text color={KIND_COLOR[kind]}>
+            {name}: {KIND_LABEL[kind]}
+          </Text>
+          <Text dimColor>
+            {' '}
+            · {lifts}
+            {b.at !== undefined ? ` · seen ${clockAt(b.at, now)}` : ''} · {oneLine(b.reason, 70)}
+          </Text>
+        </Text>
+      )
+    }
+    const quotaBlock = (p: OrchestraExternal) => {
+      const models = cat.filter(m => m.provider === p)
+      const q = usageBy[p]
+      const wide = liveBlock(p)
+      const modelBlocks = models.flatMap(m => {
+        const b = liveBlock(`${p}:${m.id}`)
+        return b ? [[m.id, b] as const] : []
+      })
+      if (models.length === 0 && q === undefined && wide === undefined) return null
+      const open = models.filter(m => m.blocked === undefined).length
+      const wideKind = wide ? (wide.kind ?? kindOf(wide.reason)) : undefined
+      const state = wideKind ? KIND_LABEL[wideKind] : models.length > 0 && open === 0 ? 'all models blocked' : modelBlocks.length > 0 ? `${open}/${models.length} models available` : 'available'
+      const color = wideKind ? KIND_COLOR[wideKind] : models.length > 0 && open === 0 ? 'red' : modelBlocks.length > 0 ? 'yellow' : 'green'
+      return (
+        <Box flexDirection="column">
+          <Text>
+            <Text bold color={PROVIDER_COLOR[p]}>
+              {PROVIDER_NAMES[p]}
+            </Text>{' '}
+            <Text color={color}>{state}</Text>
+            <Text dimColor>
+              {q?.plan ? ` · ${q.plan}` : ''}
+              {q?.credits ? ` · ${q.credits}` : ''}
+            </Text>
+          </Text>
+          {(q?.windows ?? []).map(w => (
+            <Box paddingLeft={2}>{limitRow(current(w, now))}</Box>
+          ))}
+          {(q?.groups ?? []).map(g => (
+            <Box flexDirection="column" paddingLeft={2}>
+              <Text>
+                {g.name}
+                {g.models.join(', ') !== g.name && <Text dimColor> · {oneLine(g.models.join(', '), 70)}</Text>}
+              </Text>
+              {g.windows.map(w => (
+                <Box paddingLeft={2}>{limitRow(current(w, now))}</Box>
+              ))}
+            </Box>
+          ))}
+          {q?.note !== undefined && <Text dimColor>{'  '}{q.note}</Text>}
+          {wide !== undefined && blockLine('whole CLI', wide)}
+          {modelBlocks.slice(0, 6).map(([id, b]) => blockLine(id, b))}
+          {modelBlocks.length > 6 && <Text dimColor>{'  '}…and {modelBlocks.length - 6} more blocked</Text>}
+          <Text dimColor>
+            {'  '}
+            {q ? `from ${q.source} · read ${clockAt(q.at, now)}` : NO_USAGE[p]}
+          </Text>
+        </Box>
+      )
+    }
+
     // --- Agents, by provider ----------------------------------------------------
     const filesOf = (id: string, edits: boolean) =>
       Object.entries(files)
@@ -1548,6 +1969,7 @@ export const register: Register = on => {
             </Text>
           ),
         )}
+        {card('◔ Quotas', 'by CLI · routing skips what is used up until it resets', EXTERNAL.map(quotaBlock))}
         {card(
           'Orchestra',
           `${lean ? 'lean · ' : ''}${running.length} running${PROVIDER_ORDER.map(p => {
